@@ -645,7 +645,7 @@ perform_install_manager_script() {
     local _symlink_path="/usr/local/bin/agnudp"
     
     echo "Downloading manager script..."
-    cu    curl -o "$_manager_script" "https://github.com/TspKchn/AGN-UDP/raw/main/agnudp_manag    cuhmod +x "$_manager_script"
+    cu    curl -o "$_manager_script" "https://github.com/TspKchn/AGN-UDP/raw/main/agnudp_manager.sh" chmod +x "$_manager_script"
     
     echo "Creating symbolic link to run the manager script using 'agnudp' command..."
     ln -sf "$_manager_script" "$_symlink_path"
