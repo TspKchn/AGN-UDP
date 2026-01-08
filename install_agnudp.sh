@@ -3,7 +3,7 @@ set -e
 
 ############################################
 # AGN-UDP / Hysteria v1
-# FINAL FIXED INSTALLER (NGINX SAFE)
+# FINAL INSTALLER (NGINX SAFE)
 ############################################
 
 ### BASIC CONFIG
@@ -20,32 +20,39 @@ SERVICE_FILE="/etc/systemd/system/hysteria-server.service"
 BACKUP_DIR="/backup"
 BACKUP_FILE="$BACKUP_DIR/agnudp-backup.7z"
 
-### ROOT CHECK
+############################################
+# ROOT CHECK
+############################################
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root"
   exit 1
 fi
 
+############################################
+# DOMAIN (CERT CN ONLY)
+############################################
 echo
 read -p "Enter domain name (for certificate CN, any name ok): " DOMAIN
 DOMAIN=${DOMAIN:-agnudp.local}
-echo "[✓] Using CN: $DOMAIN"
+echo "[✓] Certificate CN: $DOMAIN"
 echo
 
-### DEPENDENCIES
+############################################
+# DEPENDENCIES
+############################################
 apt update
 apt install -y curl jq sqlite3 openssl p7zip-full nginx
 
 ############################################
-# NGINX SAFE SETUP (NO ERROR GUARANTEED)
+# NGINX SAFE SETUP
 ############################################
 
-# 1) Unmask nginx if masked (CRITICAL FIX)
+# Unmask nginx (fix masked service)
 systemctl unmask nginx 2>/dev/null || true
 rm -f /etc/systemd/system/nginx.service 2>/dev/null || true
 systemctl daemon-reload
 
-# 2) Detect web port
+# Detect web port (80 -> 8080)
 if ss -tulpn | grep -q ':80 '; then
   WEB_PORT=8080
 else
@@ -53,10 +60,10 @@ else
 fi
 echo "[✓] Web server port: $WEB_PORT"
 
-# 3) Prepare backup dir
+# Prepare backup dir
 mkdir -p "$BACKUP_DIR"
 
-# 4) Nginx minimal config (single server only)
+# Minimal nginx config (no conflict with xray)
 rm -f /etc/nginx/sites-enabled/*
 rm -f /etc/nginx/conf.d/*
 
@@ -78,14 +85,12 @@ http {
 }
 EOF
 
-# 5) Start nginx safely
 systemctl restart nginx
 systemctl enable nginx
 
 ############################################
 # INSTALL HYSTERIA
 ############################################
-
 if [[ ! -f "$HYSTERIA_BIN" ]]; then
   curl -L -o /tmp/hysteria \
     https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
@@ -96,9 +101,8 @@ fi
 mkdir -p "$CONFIG_DIR"
 
 ############################################
-# CERT (SELF-SIGNED)
+# SELF-SIGNED CERT
 ############################################
-
 if [[ ! -f "$CONFIG_DIR/server.key" ]]; then
   openssl req -newkey rsa:2048 -nodes \
     -keyout "$CONFIG_DIR/server.key" \
@@ -116,7 +120,6 @@ fi
 ############################################
 # SQLITE DB
 ############################################
-
 if [[ ! -f "$DB_FILE" ]]; then
 sqlite3 "$DB_FILE" <<EOF
 CREATE TABLE users (
@@ -130,7 +133,6 @@ fi
 ############################################
 # HYSTERIA CONFIG
 ############################################
-
 cat > "$CONFIG_FILE" <<EOF
 {
   "listen": ":${UDP_PORT}",
@@ -150,7 +152,6 @@ EOF
 ############################################
 # SYSTEMD SERVICE
 ############################################
-
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=AGN-UDP (Hysteria v1)
@@ -170,9 +171,8 @@ systemctl enable hysteria-server
 systemctl restart hysteria-server
 
 ############################################
-# MANAGER
+# MANAGER SCRIPT (FULL)
 ############################################
-
 cat > /usr/local/bin/agnudp <<'EOF'
 #!/usr/bin/env bash
 
@@ -198,6 +198,7 @@ add_user() {
   exp=$(date -d "+$d days" +%F)
   sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES('$u','$p','$exp');"
   update_config
+  echo "User added"
 }
 
 extend_user() {
@@ -208,15 +209,30 @@ extend_user() {
   new=$(date -d "$cur +$d days" +%F)
   sqlite3 "$DB" "UPDATE users SET expire='$new' WHERE username='$u';"
   update_config
+  echo "User extended"
+}
+
+delete_user() {
+  read -p "Username to delete: " u
+  exists=$(sqlite3 "$DB" "SELECT username FROM users WHERE username='$u';")
+  [[ -z "$exists" ]] && echo "User not found" && return
+  read -p "Confirm delete user '$u'? [y/N]: " c
+  [[ "$c" != "y" && "$c" != "Y" ]] && return
+  sqlite3 "$DB" "DELETE FROM users WHERE username='$u';"
+  update_config
+  echo "User deleted"
 }
 
 list_user() {
+  echo "USERNAME | EXPIRE"
+  echo "------------------"
   sqlite3 "$DB" "SELECT username,expire FROM users;"
 }
 
 cleanup_expired() {
   sqlite3 "$DB" "DELETE FROM users WHERE date(expire)<date('now');"
   update_config
+  echo "Expired users cleaned"
 }
 
 backup() {
@@ -231,6 +247,7 @@ backup() {
 restore() {
   read -p "Backup Server IP: " IP
   read -p "Backup password (visible): " p
+
   TMP="/tmp/agnudp-restore"
   rm -rf "$TMP" && mkdir -p "$TMP"
 
@@ -265,21 +282,23 @@ while true; do
   echo "====== AGN-UDP Manager ======"
   echo "1) Add user"
   echo "2) Extend user"
-  echo "3) List users"
-  echo "4) Cleanup expired users"
-  echo "5) Backup"
-  echo "6) Restore"
-  echo "7) Uninstall AGN-UDP"
+  echo "3) Delete user"
+  echo "4) List users"
+  echo "5) Cleanup expired users"
+  echo "6) Backup"
+  echo "7) Restore"
+  echo "8) Uninstall AGN-UDP"
   echo "0) Exit"
   read -p "> " c
   case $c in
     1) add_user ;;
     2) extend_user ;;
-    3) list_user ;;
-    4) cleanup_expired ;;
-    5) backup ;;
-    6) restore ;;
-    7) uninstall ;;
+    3) delete_user ;;
+    4) list_user ;;
+    5) cleanup_expired ;;
+    6) backup ;;
+    7) restore ;;
+    8) uninstall ;;
     0) exit ;;
   esac
 done
@@ -287,6 +306,9 @@ EOF
 
 chmod +x /usr/local/bin/agnudp
 
+############################################
+# DONE
+############################################
 echo
 echo "[✓] AGN-UDP installed successfully"
 echo "[✓] Web server running on port: $WEB_PORT"
