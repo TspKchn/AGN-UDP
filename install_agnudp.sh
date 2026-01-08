@@ -162,17 +162,42 @@ cleanup_expired() {
 
 backup() {
   read -s -p "Backup password: " p; echo
-  7z a -p"$p" -mhe=on "$BACKUP" "$DB" >/dev/null
-  echo "Backup saved at $BACKUP"
+
+  # remove old backup if exists
+  rm -f "$BACKUP"
+
+  # sanity check
+  if [[ ! -r "$DB" ]]; then
+    echo "ERROR: Cannot read database file $DB"
+    return
+  fi
+
+  if 7z a -t7z -p"$p" -mhe=on "$BACKUP" "$DB" >/dev/null; then
+    echo "Backup saved at $BACKUP"
+  else
+    echo "Backup failed"
+    rm -f "$BACKUP"
+  fi
 }
 
 restore() {
   read -p "Path to .7z file: " f
   read -s -p "Password: " p; echo
-  rm -rf "$TMP"; mkdir -p "$TMP"
-  7z x -p"$p" "$f" -o"$TMP" >/dev/null || return
+
+  [[ ! -f "$f" ]] && echo "Backup file not found" && return
+
+  rm -rf "$TMP"
+  mkdir -p "$TMP"
+
+  if ! 7z x -p"$p" "$f" -o"$TMP" >/dev/null; then
+    echo "Restore failed (wrong password or corrupted file)"
+    rm -rf "$TMP"
+    return
+  fi
+
   cp "$TMP/users.db" "$DB"
   update_config
+  rm -rf "$TMP"
   echo "Restore completed"
 }
 
