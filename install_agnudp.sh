@@ -299,8 +299,8 @@ backup() {
 }
 
 restore() {
-  read -p "Backup server IP: " ip
-  read -p "Backup password (visible): " p
+  read -p "Restore Server IP: " ip
+  read -p "Restore Password (visible): " p
   TMP="/tmp/agnudp-restore"
   rm -rf "$TMP" && mkdir -p "$TMP"
   curl -f -o "$TMP/agnudp-backup.7z" "http://$ip/backup/agnudp-backup.7z" || \
