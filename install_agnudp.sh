@@ -163,34 +163,78 @@ cleanup_expired() {
 backup() {
   read -s -p "Backup password: " p; echo
 
-  # remove old backup if exists
-  rm -f "$BACKUP"
+  BACKUP_DIR="/backup"
+  BACKUP_FILE="$BACKUP_DIR/agnudp-backup.7z"
 
-  # sanity check
+  mkdir -p "$BACKUP_DIR"
+
+  # ลบไฟล์เก่าเสมอ (แก้ bug 7z)
+  rm -f "$BACKUP_FILE"
+
   if [[ ! -r "$DB" ]]; then
-    echo "ERROR: Cannot read database file $DB"
+    echo "ERROR: Cannot read database file"
     return
   fi
 
-  if 7z a -t7z -p"$p" -mhe=on "$BACKUP" "$DB" >/dev/null; then
-    echo "Backup saved at $BACKUP"
+  if 7z a -t7z -p"$p" -mhe=on "$BACKUP_FILE" "$DB" >/dev/null; then
+    echo "Backup saved at $BACKUP_FILE"
+    echo
+    echo "To restore from another server:"
+    echo "  cd /backup"
+    echo "  python3 -m http.server 80"
   else
     echo "Backup failed"
-    rm -f "$BACKUP"
+    rm -f "$BACKUP_FILE"
   fi
 }
 
 restore() {
-  read -p "Path to .7z file: " f
-  read -s -p "Password: " p; echo
-
-  [[ ! -f "$f" ]] && echo "Backup file not found" && return
+  echo
+  echo "Restore mode:"
+  echo "1) Restore from another server (IP)"
+  echo "2) Restore from local .7z file"
+  read -p "Select [1-2]: " mode
 
   rm -rf "$TMP"
   mkdir -p "$TMP"
 
-  if ! 7z x -p"$p" "$f" -o"$TMP" >/dev/null; then
-    echo "Restore failed (wrong password or corrupted file)"
+  case "$mode" in
+    1)
+      read -p "Backup Server IP: " IP
+      read -s -p "Backup password: " p; echo
+
+      echo "Downloading backup from http://$IP/backup/agnudp-backup.7z ..."
+      if ! curl -f -o "$TMP/agnudp-backup.7z" "http://$IP/backup/agnudp-backup.7z"; then
+        echo "ERROR: Cannot download backup file"
+        return
+      fi
+
+      if ! 7z x -p"$p" "$TMP/agnudp-backup.7z" -o"$TMP" >/dev/null; then
+        echo "ERROR: Wrong password or corrupted backup"
+        rm -rf "$TMP"
+        return
+      fi
+      ;;
+    2)
+      read -p "Path to .7z file: " f
+      read -s -p "Backup password: " p; echo
+
+      [[ ! -f "$f" ]] && echo "Backup file not found" && return
+
+      if ! 7z x -p"$p" "$f" -o"$TMP" >/dev/null; then
+        echo "ERROR: Wrong password or corrupted backup"
+        rm -rf "$TMP"
+        return
+      fi
+      ;;
+    *)
+      echo "Invalid choice"
+      return
+      ;;
+  esac
+
+  if [[ ! -f "$TMP/users.db" ]]; then
+    echo "ERROR: users.db not found in backup"
     rm -rf "$TMP"
     return
   fi
@@ -198,7 +242,7 @@ restore() {
   cp "$TMP/users.db" "$DB"
   update_config
   rm -rf "$TMP"
-  echo "Restore completed"
+  echo "Restore completed successfully"
 }
 
 uninstall() {
