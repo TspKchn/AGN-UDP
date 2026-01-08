@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-####################################
-# AGN-UDP / Hysteria v1 Installer
-# Legacy-style DOMAIN (cert only)
-# Clean / Stable / No-nginx / No-DNAT
-####################################
+############################################
+# AGN-UDP / Hysteria v1 FINAL INSTALLER
+# Web backup + restore (80 / 8080 auto)
+############################################
 
 ### BASIC CONFIG
 UDP_PORT="36712"
@@ -18,26 +17,56 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 DB_FILE="$CONFIG_DIR/users.db"
 SERVICE_FILE="/etc/systemd/system/hysteria-server.service"
 
+BACKUP_DIR="/backup"
+BACKUP_FILE="$BACKUP_DIR/agnudp-backup.7z"
+
 ### ROOT CHECK
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root"
   exit 1
 fi
 
-### ASK DOMAIN (LIKE OLD SCRIPT)
+### ASK DOMAIN (CERT ONLY)
 echo
-read -p "Enter domain for certificate (any name is OK, no DNS required): " DOMAIN
+read -p "Enter domain for certificate (any name is OK): " DOMAIN
 DOMAIN=${DOMAIN:-agnudp.local}
-echo "[✓] Certificate CN = $DOMAIN"
+echo "[✓] Certificate CN: $DOMAIN"
 echo
 
 ### DEPENDENCIES
 apt update
-apt install -y curl jq sqlite3 openssl p7zip-full
+apt install -y curl jq sqlite3 openssl p7zip-full nginx
+
+### DETECT WEB PORT (80 / 8080)
+if ss -tulpn | grep -q ':80 '; then
+  WEB_PORT=8080
+else
+  WEB_PORT=80
+fi
+
+echo "[✓] Web server will use port: $WEB_PORT"
+
+### NGINX CONFIG (MINIMAL)
+rm -f /etc/nginx/sites-enabled/default
+
+cat > /etc/nginx/sites-available/agnudp <<EOF
+server {
+    listen ${WEB_PORT};
+    server_name _;
+    root /backup;
+
+    location / {
+        autoindex on;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/agnudp /etc/nginx/sites-enabled/agnudp
+systemctl restart nginx
+systemctl enable nginx
 
 ### INSTALL HYSTERIA
 if [[ ! -f "$HYSTERIA_BIN" ]]; then
-  echo "[+] Installing Hysteria v1.3.5"
   curl -L -o /tmp/hysteria \
     https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
   chmod +x /tmp/hysteria
@@ -46,8 +75,9 @@ fi
 
 ### PREPARE DIR
 mkdir -p "$CONFIG_DIR"
+mkdir -p "$BACKUP_DIR"
 
-### SELF-SIGNED CERT (DOMAIN ONLY FOR CN/SAN)
+### CERT (SELF-SIGNED)
 if [[ ! -f "$CONFIG_DIR/server.key" ]]; then
   openssl req -newkey rsa:2048 -nodes \
     -keyout "$CONFIG_DIR/server.key" \
@@ -91,7 +121,7 @@ cat > "$CONFIG_FILE" <<EOF
 }
 EOF
 
-### SYSTEMD SERVICE
+### SYSTEMD
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=AGN-UDP (Hysteria v1)
@@ -110,9 +140,9 @@ systemctl daemon-reload
 systemctl enable hysteria-server
 systemctl restart hysteria-server
 
-####################################
-# AGN-UDP MANAGER (7 MENUS)
-####################################
+############################################
+# MANAGER
+############################################
 
 cat > /usr/local/bin/agnudp <<'EOF'
 #!/usr/bin/env bash
@@ -120,9 +150,9 @@ cat > /usr/local/bin/agnudp <<'EOF'
 DB="/etc/hysteria/users.db"
 CFG="/etc/hysteria/config.json"
 SERVICE="hysteria-server"
+BACKUP_DIR="/backup"
+BACKUP_FILE="$BACKUP_DIR/agnudp-backup.7z"
 DEFAULT_DAYS=30
-BACKUP="/tmp/agnudp-backup.7z"
-TMP="/tmp/agnudp-restore"
 
 update_config() {
   users=$(sqlite3 "$DB" "SELECT username||':'||password FROM users WHERE date(expire)>=date('now');")
@@ -161,80 +191,37 @@ cleanup_expired() {
 }
 
 backup() {
-  read -s -p "Backup password: " p; echo
-
-  BACKUP_DIR="/backup"
-  BACKUP_FILE="$BACKUP_DIR/agnudp-backup.7z"
-
+  read -p "Backup password (will be visible): " p
   mkdir -p "$BACKUP_DIR"
-
-  # ลบไฟล์เก่าเสมอ (แก้ bug 7z)
   rm -f "$BACKUP_FILE"
 
-  if [[ ! -r "$DB" ]]; then
-    echo "ERROR: Cannot read database file"
-    return
-  fi
-
   if 7z a -t7z -p"$p" -mhe=on "$BACKUP_FILE" "$DB" >/dev/null; then
-    echo "Backup saved at $BACKUP_FILE"
-    echo
-    echo "To restore from another server:"
-    echo "  cd /backup"
-    echo "  python3 -m http.server 80"
+    echo "Backup saved:"
+    echo "$BACKUP_FILE"
   else
     echo "Backup failed"
-    rm -f "$BACKUP_FILE"
   fi
 }
 
 restore() {
-  echo
-  echo "Restore mode:"
-  echo "1) Restore from another server (IP)"
-  echo "2) Restore from local .7z file"
-  read -p "Select [1-2]: " mode
+  read -p "Backup Server IP: " IP
+  read -p "Backup password (will be visible): " p
 
+  TMP="/tmp/agnudp-restore"
   rm -rf "$TMP"
   mkdir -p "$TMP"
 
-  case "$mode" in
-    1)
-      read -p "Backup Server IP: " IP
-      read -s -p "Backup password: " p; echo
+  if curl -f -o "$TMP/agnudp-backup.7z" "http://$IP/agnudp-backup.7z"; then
+    :
+  elif curl -f -o "$TMP/agnudp-backup.7z" "http://$IP:8080/agnudp-backup.7z"; then
+    :
+  else
+    echo "ERROR: Cannot download backup from $IP"
+    return
+  fi
 
-      echo "Downloading backup from http://$IP/backup/agnudp-backup.7z ..."
-      if ! curl -f -o "$TMP/agnudp-backup.7z" "http://$IP/backup/agnudp-backup.7z"; then
-        echo "ERROR: Cannot download backup file"
-        return
-      fi
-
-      if ! 7z x -p"$p" "$TMP/agnudp-backup.7z" -o"$TMP" >/dev/null; then
-        echo "ERROR: Wrong password or corrupted backup"
-        rm -rf "$TMP"
-        return
-      fi
-      ;;
-    2)
-      read -p "Path to .7z file: " f
-      read -s -p "Backup password: " p; echo
-
-      [[ ! -f "$f" ]] && echo "Backup file not found" && return
-
-      if ! 7z x -p"$p" "$f" -o"$TMP" >/dev/null; then
-        echo "ERROR: Wrong password or corrupted backup"
-        rm -rf "$TMP"
-        return
-      fi
-      ;;
-    *)
-      echo "Invalid choice"
-      return
-      ;;
-  esac
-
-  if [[ ! -f "$TMP/users.db" ]]; then
-    echo "ERROR: users.db not found in backup"
+  if ! 7z x -p"$p" "$TMP/agnudp-backup.7z" -o"$TMP" >/dev/null; then
+    echo "ERROR: Wrong password or corrupted file"
     rm -rf "$TMP"
     return
   fi
@@ -242,7 +229,7 @@ restore() {
   cp "$TMP/users.db" "$DB"
   update_config
   rm -rf "$TMP"
-  echo "Restore completed successfully"
+  echo "Restore completed"
 }
 
 uninstall() {
@@ -287,5 +274,7 @@ chmod +x /usr/local/bin/agnudp
 
 echo
 echo "[✓] AGN-UDP installed successfully"
-echo "[✓] Certificate CN: $DOMAIN"
-echo "[✓] Run command: agnudp"
+echo "[✓] Web server port: $WEB_PORT"
+echo "[✓] Backup URL example:"
+echo "    http://SERVER_IP:${WEB_PORT}/agnudp-backup.7z"
+echo "[✓] Run manager: agnudp"
