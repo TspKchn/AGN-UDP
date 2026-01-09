@@ -133,20 +133,31 @@ iptables-save > /etc/iptables/rules.v4
 mkdir -p "$BACKUP_DIR"
 chmod 755 "$BACKUP_DIR"
 
-### ================= NGINX 8080 =================
+### ================= SAFE NGINX SETUP =================
+
+# remove old conflicting agnudp config if exists
+rm -f /etc/nginx/sites-enabled/agnudp 2>/dev/null
+
+# write isolated config (DO NOT touch nginx.conf)
 cat > "$NGINX_CONF" <<EOF
 server {
-    listen $NGINX_PORT default_server;
+    listen $NGINX_PORT;
     server_name _;
-    location ^~ /backup/ {
+
+    location /backup/ {
         alias $BACKUP_DIR/;
         autoindex on;
     }
 }
 EOF
 
-nginx -t
-systemctl restart nginx
+# validate before reload (safe)
+if nginx -t; then
+    systemctl reload nginx
+else
+    echo "❌ nginx config error, abort install"
+    exit 1
+fi
 
 ### ================= MANAGER =================
 cat > /usr/local/bin/agnudp <<'EOF'
