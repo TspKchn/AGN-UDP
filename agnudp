@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+DB="/etc/hysteria/users.db"
+CFG="/etc/hysteria/config.json"
+
+STATE="/etc/agnudp"
+MODE="$STATE/mode"
+LAST="$STATE/last_sync"
+
+BACKUP="/backup/agnudp-backup.7z"
+
+mkdir -p "$STATE"
+
+get_mode(){ [[ -f $MODE ]] && cat $MODE || echo manual; }
+set_mode(){ echo "$1" > "$MODE"; }
+
+update_cfg(){
+  users=$(sqlite3 "$DB" "select username||\":\"||password from users where date(expire)>=date('now')")
+  jq ".auth.config = $(printf '%s\n' "$users" | jq -R . | jq -s .)" \
+    "$CFG" > /tmp/cfg && mv /tmp/cfg "$CFG"
+  systemctl restart hysteria-server
+}
+
+cleanup(){
+  [[ "$(get_mode)" == sync* ]] && return
+  sqlite3 "$DB" "delete from users where date(expire)<date('now')"
+  update_cfg
+}
+
+sync_local(){
+  set_mode sync:local
+  sqlite3 "$DB" "delete from users"
+
+  while IFS=: read -r u _ uid _ _ _ _; do
+    [[ $uid -lt 1000 || $uid -eq 65534 ]] && continue
+    exp=$(grep "^$u:" /etc/shadow | awk -F: '{print $8}')
+    [[ -z $exp ]] && continue
+    date=$(date -d "1970-01-01 +$exp days" +%F)
+    sqlite3 "$DB" "insert into users values('$u','$u','$date')"
+  done < /etc/passwd
+
+  date +"%F %T" > "$LAST"
+  update_cfg
+}
+
+sync_remote(){
+  read -p "Remote IP: " ip
+  read -p "SSH Port [22]: " port
+  port=${port:-22}
+  read -p "SSH User: " user
+  read -s -p "SSH Password: " pass
+  echo
+
+  set_mode sync:remote
+  tmp=/tmp/agnudp-r
+  rm -rf "$tmp"; mkdir "$tmp"
+
+  sshpass -p "$pass" ssh -o StrictHostKeyChecking=no -p "$port" "$user@$ip" cat /etc/passwd > "$tmp/passwd" || return
+  sshpass -p "$pass" ssh -o StrictHostKeyChecking=no -p "$port" "$user@$ip" cat /etc/shadow > "$tmp/shadow" || return
+
+  sqlite3 "$DB" "delete from users"
+
+  while IFS=: read -r u _ uid _ _ _ _; do
+    [[ $uid -lt 1000 || $uid -eq 65534 ]] && continue
+    exp=$(grep "^$u:" "$tmp/shadow" | awk -F: '{print $8}')
+    [[ -z $exp ]] && continue
+    date=$(date -d "1970-01-01 +$exp days" +%F)
+    sqlite3 "$DB" "insert into users values('$u','$u','$date')"
+  done < "$tmp/passwd"
+
+  date +"%F %T" > "$LAST"
+  update_cfg
+}
+
+backup(){
+  read -s -p "Backup password: " p; echo
+  rm -f "$BACKUP"
+  7z a -p"$p" -mhe=on "$BACKUP" "$DB" >/dev/null
+}
+
+restore(){
+  read -p "Source IP: " ip
+  read -s -p "Password: " p; echo
+  tmp=/tmp/agnudp-restore
+  rm -rf "$tmp"; mkdir "$tmp"
+  curl -f -o "$tmp/b.7z" "http://$ip:8080/backup/agnudp-backup.7z" || return
+  7z x -p"$p" "$tmp/b.7z" -o"$tmp" >/dev/null || return
+  cp "$tmp/users.db" "$DB"
+  set_mode manual
+  update_cfg
+}
+
+while true; do
+  m=$(get_mode)
+  a="ENABLED"; [[ $m == sync* ]] && a="DISABLED"
+  echo "=== AGN-UDP ==="
+  echo "Mode: $m | AutoDelete: $a | LastSync: $(cat $LAST 2>/dev/null || echo -)"
+  echo "1 Add  2 Extend  3 Delete  4 List"
+  echo "5 Backup  6 Restore"
+  echo "7 Sync Local  8 Sync Remote"
+  echo "9 Cleanup  0 Exit"
+  read -p "> " c
+  case $c in
+    1) read -p "User: " u; read -p "Days: " d; e=$(date -d "+$d days" +%F); sqlite3 "$DB" "insert or replace into users values('$u','$u','$e')"; set_mode manual; update_cfg;;
+    2) read -p "User: " u; read -p "Add days: " d; cur=$(sqlite3 "$DB" "select expire from users where username='$u'"); n=$(date -d "$cur +$d days" +%F); sqlite3 "$DB" "update users set expire='$n' where username='$u'"; set_mode manual; update_cfg;;
+    3) read -p "User: " u; sqlite3 "$DB" "delete from users where username='$u'"; set_mode manual; update_cfg;;
+    4) sqlite3 "$DB" "select username,expire from users";;
+    5) backup;;
+    6) restore;;
+    7) sync_local;;
+    8) sync_remote;;
+    9) cleanup;;
+    0) exit;;
+  esac
+done
