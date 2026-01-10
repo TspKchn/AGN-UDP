@@ -101,12 +101,19 @@ systemctl restart hysteria-server
 
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
+# UDP NAT for Hysteria
 iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT
 
+# Allow AGN-UDP backup / restore (TCP 8080)
+iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || \
+iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
+
+# Kernel / network tuning
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.$IFACE.rp_filter=0
+
 iptables-save > /etc/iptables/rules.v4
 
 mkdir -p "$BACKUP_DIR"
