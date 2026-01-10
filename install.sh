@@ -24,6 +24,13 @@ NGINX_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
 ### ================= ROOT CHECK =================
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 
+### ================= ARCH CHECK =================
+ARCH=$(uname -m)
+if [[ "$ARCH" != "x86_64" ]]; then
+  echo "Only x86_64 is supported"
+  exit 1
+fi
+
 ### ================= DOMAIN INPUT =================
 read -rp "Enter DOMAIN (DNS must point to this VPS): " DOMAIN
 [[ -z "$DOMAIN" ]] && { echo "Domain required"; exit 1; }
@@ -33,15 +40,15 @@ apt update
 apt install -y \
   curl jq sqlite3 openssl \
   iptables iptables-persistent \
-  nginx p7zip-full sshpass
+  nginx p7zip-full \
+  sshpass
 
-### ================= INSTALL HYSTERIA =================
-if [[ ! -f "$HYSTERIA_BIN" ]]; then
-  curl -L -o /tmp/hysteria \
-    https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
-  chmod +x /tmp/hysteria
-  mv /tmp/hysteria "$HYSTERIA_BIN"
-fi
+### ================= INSTALL HYSTERIA (FORCE) =================
+echo "[*] Installing hysteria v1.3.5 ..."
+rm -f "$HYSTERIA_BIN"
+curl -L -o "$HYSTERIA_BIN" \
+  https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
+chmod +x "$HYSTERIA_BIN"
 
 ### ================= CERT =================
 mkdir -p "$CONFIG_DIR"
@@ -114,13 +121,15 @@ systemctl restart hysteria-server
 ### ================= NETWORK / FIREWALL =================
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
+# UDP DNAT
 iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT
 
-# Allow backup port
+# Allow backup port (8080)
 iptables -C INPUT -p tcp --dport $NGINX_PORT -j ACCEPT 2>/dev/null || \
 iptables -I INPUT -p tcp --dport $NGINX_PORT -j ACCEPT
 
+# Required sysctl only
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.$IFACE.rp_filter=0
@@ -149,20 +158,14 @@ nginx -t && systemctl reload nginx
 curl -fsSL "$REPO_RAW/agnudp" -o /usr/local/bin/agnudp
 chmod +x /usr/local/bin/agnudp
 
-### ================= CRON =================
-cat > /etc/cron.d/agnudp <<EOF
-0 3 * * * root /usr/local/bin/agnudp sync-local >> /var/log/agnudp-sync.log 2>&1
-10 3 * * * root /usr/local/bin/agnudp cleanup >> /var/log/agnudp-clean.log 2>&1
-EOF
-
 ### ================= DONE =================
 echo
 echo "======================================"
 echo " AGN-UDP INSTALL COMPLETED"
 echo "--------------------------------------"
-echo " Domain      : $DOMAIN"
-echo " UDP Port    : $UDP_PORT"
-echo " Backup URL  : http://$DOMAIN:$NGINX_PORT/backup/"
+echo " Domain     : $DOMAIN"
+echo " UDP Port   : $UDP_PORT"
+echo " Backup URL : http://$DOMAIN:$NGINX_PORT/backup/"
 echo
-echo " Run manager : agnudp"
+echo " Run manager: agnudp"
 echo "======================================"
