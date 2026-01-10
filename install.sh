@@ -18,18 +18,13 @@ HYSTERIA_BIN="/usr/local/bin/hysteria"
 SERVICE_FILE="/etc/systemd/system/hysteria-server.service"
 
 BACKUP_DIR="/backup"
-NGINX_PORT="8080"
-NGINX_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
+
+# ใช้ไฟล์เดียวกับ ShowOn
+NGINX_CONF="/etc/nginx/conf.d/vps.conf"
+BACKUP_PORT="8080"
 
 ### ================= ROOT CHECK =================
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
-
-### ================= ARCH CHECK =================
-ARCH=$(uname -m)
-if [[ "$ARCH" != "x86_64" ]]; then
-  echo "Only x86_64 is supported"
-  exit 1
-fi
 
 ### ================= DOMAIN INPUT =================
 read -rp "Enter DOMAIN (DNS must point to this VPS): " DOMAIN
@@ -40,14 +35,12 @@ apt update
 apt install -y \
   curl jq sqlite3 openssl \
   iptables iptables-persistent \
-  nginx p7zip-full \
-  sshpass
+  nginx p7zip-full sshpass
 
 ### ================= INSTALL HYSTERIA (FORCE) =================
-echo "[*] Installing hysteria v1.3.5 ..."
 rm -f "$HYSTERIA_BIN"
 curl -L -o "$HYSTERIA_BIN" \
-  https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
+https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-amd64
 chmod +x "$HYSTERIA_BIN"
 
 ### ================= CERT =================
@@ -125,11 +118,10 @@ IFACE=$(ip route | awk '/default/ {print $5; exit}')
 iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT
 
-# Allow backup port (8080)
-iptables -C INPUT -p tcp --dport $NGINX_PORT -j ACCEPT 2>/dev/null || \
-iptables -I INPUT -p tcp --dport $NGINX_PORT -j ACCEPT
+# เปิด TCP 8080 สำหรับ backup
+iptables -C INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT 2>/dev/null || \
+iptables -I INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT
 
-# Required sysctl only
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.$IFACE.rp_filter=0
@@ -140,23 +132,40 @@ iptables-save > /etc/iptables/rules.v4
 mkdir -p "$BACKUP_DIR"
 chmod 755 "$BACKUP_DIR"
 
-### ================= NGINX BACKUP =================
-cat > "$NGINX_CONF" <<EOF
-server {
-  listen $NGINX_PORT;
-  server_name _;
-  location /backup/ {
-    alias $BACKUP_DIR/;
-    autoindex on;
-  }
-}
+### ================= NGINX (USE vps.conf) =================
+if [[ ! -f "$NGINX_CONF" ]]; then
+  echo "❌ $NGINX_CONF not found (ShowOn not installed?)"
+  exit 1
+fi
+
+# เพิ่ม listen 8080 ถ้ายังไม่มี
+if ! grep -q "listen $BACKUP_PORT" "$NGINX_CONF"; then
+  sed -i "/server {/a\\    listen $BACKUP_PORT;" "$NGINX_CONF"
+fi
+
+# เพิ่ม location /backup ถ้ายังไม่มี
+if ! grep -q "location /backup/" "$NGINX_CONF"; then
+cat >> "$NGINX_CONF" <<'EOF'
+
+    # AGN-UDP Backup
+    location /backup/ {
+        alias /backup/;
+        autoindex on;
+    }
 EOF
+fi
 
 nginx -t && systemctl reload nginx
 
 ### ================= INSTALL AGNUDP =================
 curl -fsSL "$REPO_RAW/agnudp" -o /usr/local/bin/agnudp
 chmod +x /usr/local/bin/agnudp
+
+### ================= CRON =================
+cat > /etc/cron.d/agnudp <<EOF
+0 3 * * * root /usr/local/bin/agnudp sync-local >> /var/log/agnudp-sync.log 2>&1
+10 3 * * * root /usr/local/bin/agnudp cleanup >> /var/log/agnudp-clean.log 2>&1
+EOF
 
 ### ================= DONE =================
 echo
@@ -165,7 +174,7 @@ echo " AGN-UDP INSTALL COMPLETED"
 echo "--------------------------------------"
 echo " Domain     : $DOMAIN"
 echo " UDP Port   : $UDP_PORT"
-echo " Backup URL : http://$DOMAIN:$NGINX_PORT/backup/"
+echo " Backup URL : http://$DOMAIN:$BACKUP_PORT/backup/"
 echo
 echo " Run manager: agnudp"
 echo "======================================"
