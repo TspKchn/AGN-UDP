@@ -154,18 +154,54 @@ cleanup_expired() {
 
 ### ===== UNINSTALL =====
 uninstall_all() {
-  echo "⚠️  REMOVE AGN-UDP COMPLETELY"
+  echo
+  echo "⚠️  THIS WILL REMOVE AGN-UDP COMPLETELY"
+  echo "    (Hysteria + DB + Backup + Cron + IPTables)"
+  echo
   read -rp "Type YES to confirm: " c
   [[ "$c" != "YES" ]] && return
 
+  echo "[*] Stopping services..."
   systemctl stop hysteria-server 2>/dev/null || true
   systemctl disable hysteria-server 2>/dev/null || true
-  rm -rf /etc/hysteria /etc/agnudp /usr/local/bin/agnudp
-  rm -f "$CRON_FILE" "$NGINX_CONF"
-  systemctl reload nginx 2>/dev/null || true
+
+  echo "[*] Removing systemd service..."
+  rm -f /etc/systemd/system/hysteria-server.service
   systemctl daemon-reload
-  echo "[✓] AGN-UDP REMOVED"
-  exit
+
+  echo "[*] Removing cron..."
+  rm -f /etc/cron.d/agnudp
+  pkill -f agnudp 2>/dev/null || true
+
+  echo "[*] Removing nginx backup config..."
+  rm -f /etc/nginx/conf.d/agnudp-backup.conf
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx
+
+  echo "[*] Removing files..."
+  rm -rf /etc/hysteria
+  rm -rf /etc/agnudp
+  rm -rf /backup
+  rm -f /usr/local/bin/agnudp
+
+  echo "[*] Cleaning iptables..."
+  IFACE=$(ip route | awk '/default/ {print $5; exit}')
+
+  # UDP DNAT
+  while iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null; do
+    iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712
+  done
+
+  # Backup port
+  while iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport 8080 -j ACCEPT
+  done
+
+  iptables-save > /etc/iptables/rules.v4
+
+  echo
+  echo "[✓] AGN-UDP UNINSTALLED COMPLETELY"
+  echo
+  exit 0
 }
 
 ### ===== MENU =====
