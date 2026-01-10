@@ -42,7 +42,7 @@ AGN-UDP/
 
 ## ⚙️ Installation
 ```
-curl -fsSL https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/install.sh | bash
+wget -O /root/Install https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/install.sh && chmod +x /root/Install && /root/Install && rm -f /root/Install
 
 ```
 หลังติดตั้งเสร็จ ใช้คำสั่ง:
