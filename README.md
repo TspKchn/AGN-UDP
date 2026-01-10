@@ -41,9 +41,10 @@ AGN-UDP/
 ---
 
 ## ⚙️ Installation
-
+```
 curl -fsSL https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/install.sh | bash
 
+```
 หลังติดตั้งเสร็จ ใช้คำสั่ง:
 
 agnudp
