@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-### ================= BASIC PATH =================
+### ================= PATH =================
 CFG="/etc/hysteria/config.json"
 DB="/etc/hysteria/users.db"
 
@@ -12,14 +12,9 @@ LASTSYNC="$STATE/last_sync"
 BACKUP_DIR="/backup"
 BACKUP_FILE="$BACKUP_DIR/agnudp-users.db.7z"
 
-SERVICE="hysteria-server"
-CRON_FILE="/etc/cron.d/agnudp"
-
 REPO_RAW="https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/agnudp"
 
 mkdir -p "$STATE"
-
-### ================= STATE INIT =================
 [[ ! -f "$MODEFILE" ]] && echo "manual" > "$MODEFILE"
 
 MODE=$(cat "$MODEFILE")
@@ -86,7 +81,7 @@ backup_db() {
   read -rp "Backup password: " p
   rm -f "$BACKUP_FILE"
   7z a -p"$p" -mhe=on "$BACKUP_FILE" "$DB" >/dev/null
-  echo "[✓] Backup saved: $BACKUP_FILE"
+  echo "[✓] Backup saved"
 }
 
 restore_db() {
@@ -101,13 +96,11 @@ restore_db() {
   rm -rf "$tmp" && mkdir -p "$tmp"
 
   curl -fsSL "http://$ip:8080/backup/$(basename $BACKUP_FILE)" -o "$tmp/db.7z" || {
-    echo "❌ Download failed"
-    return
+    echo "❌ Download failed"; return;
   }
 
   7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null || {
-    echo "❌ Wrong password"
-    return
+    echo "❌ Wrong password"; return;
   }
 
   cp "$tmp/$(basename $DB)" "$DB"
@@ -115,7 +108,7 @@ restore_db() {
   echo "[✓] Restore completed"
 }
 
-### ================= SSH HELPER =================
+### ================= SSH =================
 ssh_exec() {
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
@@ -125,32 +118,31 @@ ssh_exec() {
 }
 
 ### ================= SYNC CORE =================
-sync_import() {
+sync_import_expire_date() {
   sqlite3 "$DB" "delete from users;"
-  while IFS='|' read -r u e; do
-    [[ -z "$u" ]] && continue
-    sqlite3 "$DB" "insert into users values('$u','$u','$e');"
+  while IFS='|' read -r u exp; do
+    [[ -z "$u" || -z "$exp" ]] && continue
+    sqlite3 "$DB" "insert into users values('$u','$u','$exp');"
   done <<< "$1"
 
   update_cfg
   date +"%F %T" > "$LASTSYNC"
-
-  MODE=$(cat "$MODEFILE")
   LASTSYNC_TXT=$(cat "$LASTSYNC")
-  AUTODELETE="DISABLED"
 }
 
 ### ================= SYNC LOCAL =================
 sync_local() {
   echo
-  echo "⏳ Syncing local data..."
+  echo "⏳ Syncing local users..."
   echo
 
   DATA=$(sqlite3 "$DB" "select username,expire from users;")
-  sync_import "$DATA"
 
   echo "sync:local" > "$MODEFILE"
   MODE=$(cat "$MODEFILE")
+  AUTODELETE="DISABLED"
+
+  sync_import_expire_date "$DATA"
 
   echo "[✓] Sync local completed"
 }
@@ -164,25 +156,24 @@ sync_webmin() {
   read -rp "SSH Password: " SSH_PASS
 
   echo
-  echo "⏳ Syncing webmin users..."
+  echo "⏳ Syncing webmin..."
   echo
 
   DATA=$(ssh_exec "
-    awk -F: '
-      \$3>=1000 && \$3<65534 {
-        exp=\$8;
-        if(exp==\"\" || exp==\"99999\") next;
-        printf \"%s|%s\n\", \$1, strftime(\"%Y-%m-%d\", (exp*86400))
-      }
-    ' /etc/shadow
+    awk -F: '\$3>=1000 && \$3<65534 && \$8!=\"\" && \$8!=\"99999\" {
+      print \$1\"|\"strftime(\"%Y-%m-%d\", \$8*86400)
+    }' /etc/shadow
   ")
 
-  [[ -z \"$DATA\" ]] && { echo \"❌ Sync webmin failed\"; return; }
+  [[ -z \"$DATA\" ]] && { echo \"❌ Sync failed\"; return; }
 
-  echo \"sync:webmin\" > \"$MODEFILE\"
-  sync_import \"$DATA\"
+  echo "sync:webmin" > "$MODEFILE"
+  MODE=$(cat "$MODEFILE")
+  AUTODELETE="DISABLED"
 
-  echo \"[✓] Sync webmin completed\"
+  sync_import_expire_date "$DATA"
+
+  echo "[✓] Sync webmin completed"
 }
 
 ### ================= SYNC X-UI =================
@@ -194,7 +185,7 @@ sync_xui() {
   read -rp "SSH Password: " SSH_PASS
 
   echo
-  echo "⏳ Syncing x-ui users..."
+  echo "⏳ Syncing x-ui..."
   echo
 
   DATA=$(ssh_exec "
@@ -205,49 +196,38 @@ sync_xui() {
     \"
   ")
 
-  [[ -z \"$DATA\" ]] && { echo \"❌ Sync x-ui failed\"; return; }
+  [[ -z \"$DATA\" ]] && { echo \"❌ Sync failed\"; return; }
 
-  echo \"sync:x-ui\" > \"$MODEFILE\"
-  sync_import \"$DATA\"
+  echo "sync:x-ui" > "$MODEFILE"
+  MODE=$(cat "$MODEFILE")
+  AUTODELETE="DISABLED"
 
-  echo \"[✓] Sync x-ui completed\"
+  sync_import_expire_date "$DATA"
+
+  echo "[✓] Sync x-ui completed"
 }
 
 ### ================= CLEANUP =================
 cleanup_expired() {
-  [[ \"$AUTODELETE\" != \"ENABLED\" ]] && {
-    echo \"[!] AutoDelete disabled in sync mode\"
+  [[ "$AUTODELETE" != "ENABLED" ]] && {
+    echo "[!] AutoDelete disabled in sync mode"
     return
   }
-  sqlite3 \"$DB\" \"delete from users where date(expire)<date('now');\"
+  sqlite3 "$DB" "delete from users where date(expire)<date('now');"
   update_cfg
-  echo \"[✓] Cleanup completed\"
+  echo "[✓] Cleanup completed"
 }
 
 ### ================= UPDATE =================
 update_agnudp() {
-  clear
-  echo "================================="
-  echo "        UPDATE AGNUDP"
-  echo "================================="
   echo
   echo "⏳ Updating agnudp..."
   echo
-
-  TMP=\"/tmp/agnudp.update.\$\$\"
-
-  curl -fsSL \"$REPO_RAW\" -o \"$TMP\" || {
-    echo \"❌ Update failed\"
-    pause
-    return
-  }
-
-  chmod +x \"$TMP\"
-  mv \"$TMP\" /usr/local/bin/agnudp
-
-  echo \"[✓] agnudp updated\"
-  sleep 1
-  exec /usr/local/bin/agnudp
+  tmp=/tmp/agnudp.$$
+  curl -fsSL "$REPO_RAW" -o "$tmp" || { echo "❌ Update failed"; return; }
+  chmod +x "$tmp"
+  mv "$tmp" /usr/local/bin/agnudp
+  exec agnudp
 }
 
 ### ================= MENU =================
