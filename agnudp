@@ -189,78 +189,53 @@ cleanup_expired() {
 uninstall_all() {
   clear
   echo "======================================"
-  echo "   AGN-UDP FORCE UNINSTALL (SAFE)"
+  echo "   AGN-UDP FORCE UNINSTALL"
   echo "======================================"
   echo
-  echo "This will REMOVE AGN-UDP ONLY."
-  echo "It will NOT touch:"
-  echo " - 3x-ui"
-  echo " - ShowOn"
-  echo " - watchdog"
+  echo "This will REMOVE AGN-UDP ONLY"
+  echo "3x-ui / ShowOn / watchdog will NOT be touched"
   echo
   read -rp "Type YES to confirm: " c
-  [[ "$c" != "YES" ]] && return
+  [[ "$c" != "YES" ]] && { echo "Cancelled"; sleep 1; return; }
 
   echo
-  echo "[*] Stopping hysteria service..."
-  systemctl stop hysteria-server 2>/dev/null || true
-  systemctl disable hysteria-server 2>/dev/null || true
+  echo "[*] Stopping services..."
+  set +e   # <<< 🔥 สำคัญที่สุด
+
+  systemctl stop hysteria-server >/dev/null 2>&1 || true
+  systemctl disable hysteria-server >/dev/null 2>&1 || true
 
   echo "[*] Removing systemd service..."
   rm -f /etc/systemd/system/hysteria-server.service
   rm -f /lib/systemd/system/hysteria-server.service
-  systemctl daemon-reload
-  systemctl reset-failed
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed >/dev/null 2>&1 || true
 
-  echo "[*] Removing AGN-UDP cron..."
+  echo "[*] Removing cron..."
   rm -f /etc/cron.d/agnudp
-  pkill -f agnudp 2>/dev/null || true
 
-  echo "[*] Removing AGN-UDP files..."
+  echo "[*] Removing files..."
   rm -rf /etc/hysteria
   rm -rf /etc/agnudp
   rm -rf /backup
   rm -f /usr/local/bin/agnudp
   rm -f /usr/local/bin/hysteria
 
-  echo "[*] Cleaning iptables (AGN-UDP only)..."
+  echo "[*] Cleaning iptables..."
   IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
-  # remove UDP DNAT (hysteria)
-  while iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null; do
-    iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712
-  done
+  iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null
+  iptables -D INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null
 
-  # remove backup port 8080
-  while iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null; do
-    iptables -D INPUT -p tcp --dport 8080 -j ACCEPT
-  done
-
-  iptables-save > /etc/iptables/rules.v4
-
-  echo "[*] Cleaning nginx AGN-UDP config..."
-
-  VPS_CONF="/etc/nginx/conf.d/vps.conf"
-  OLD_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
-
-  # Remove AGN-UDP block from vps.conf (marker-based)
-  if [[ -f "$VPS_CONF" ]]; then
-    sed -i '/# ==== AGN-UDP BACKUP START ====/{:a;/# ==== AGN-UDP BACKUP END ====/!{N;ba};d}' "$VPS_CONF"
-  fi
-
-  # Remove legacy nginx config
-  [[ -f "$OLD_CONF" ]] && rm -f "$OLD_CONF"
-
-  # Reload nginx safely
-  if nginx -t >/dev/null 2>&1; then
-    systemctl reload nginx
-  else
-    echo "[!] nginx config error, skipped reload"
-  fi
+  echo "[*] Cleaning nginx config..."
+  sed -i '/AGN-UDP/d' /etc/nginx/conf.d/*.conf 2>/dev/null
+  rm -f /etc/nginx/conf.d/agnudp-backup.conf
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
 
   echo
   echo "[✓] AGN-UDP REMOVED COMPLETELY"
-  echo "[✓] 3x-ui / ShowOn / watchdog NOT touched"
+  echo "[✓] System clean"
   echo
 
   sleep 2
