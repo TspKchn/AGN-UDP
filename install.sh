@@ -1,5 +1,50 @@
-#!/usr/bin/env bash
+#!/usr/bin/env hysteria-server
 set -e
+
+### ================= FORCE CLEAN OLD AGN-UDP =================
+echo "[*] Pre-clean old AGN-UDP (safe mode)"
+
+set +e
+
+# stop hysteria if exists
+systemctl stop hysteria-server 2>/dev/null
+systemctl disable hysteria-server 2>/dev/null
+
+# remove agnudp cron
+rm -f /etc/cron.d/agnudp
+
+# remove agnudp files
+rm -rf /etc/agnudp
+rm -rf /etc/hysteria
+rm -rf /backup
+rm -f /usr/local/bin/agnudp
+rm -f /usr/local/bin/hysteria
+
+# remove systemd service
+rm -f /etc/systemd/system/hysteria-server.service
+rm -f /lib/systemd/system/hysteria-server.service
+systemctl daemon-reload 2>/dev/null
+systemctl reset-failed 2>/dev/null
+
+# clean iptables (AGN-UDP only)
+IFACE=$(ip route | awk '/default/ {print $5; exit}')
+iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null
+iptables -D INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null
+iptables-save > /etc/iptables/rules.v4 2>/dev/null
+
+# clean nginx agnudp config (old + new)
+rm -f /etc/nginx/conf.d/agnudp-backup.conf
+
+if [[ -f /etc/nginx/conf.d/vps.conf ]]; then
+  sed -i '/AGN-UDP/d' /etc/nginx/conf.d/vps.conf
+fi
+
+nginx -t >/dev/null 2>&1 && systemctl reload nginx
+
+set -e
+echo "[✓] Old AGN-UDP cleaned"
+echo
+### ================= END FORCE CLEAN =================
 
 ### ================= BASIC CONFIG =================
 REPO_RAW="https://raw.githubusercontent.com/TspKchn/AGN-UDP/main"
