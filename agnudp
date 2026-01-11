@@ -178,32 +178,62 @@ sync_webmin() {
 
 ### ================= SYNC X-UI =================
 sync_xui() {
-  read -rp "Remote IP: " SSH_HOST
+sync_xui() {
+  echo
+  echo "[*] Syncing from x-ui..."
+  echo
+
+  read -rp "x-ui Server IP: " SSH_HOST
   read -rp "SSH Port [22]: " SSH_PORT
   SSH_PORT=${SSH_PORT:-22}
   read -rp "SSH User: " SSH_USER
-  read -rp "SSH Password: " SSH_PASS
-
-  echo
-  echo "⏳ Syncing x-ui..."
+  read -rp "SSH Password (visible): " SSH_PASS
   echo
 
-  DATA=$(ssh_exec "
-    sqlite3 /etc/x-ui/x-ui.db \"
-      select email||'|'||strftime('%Y-%m-%d',expiry_time/1000,'unixepoch')
-      from client_traffics
-      where expiry_time>0;
-    \"
-  ")
+  # ดึง id + expiry_time จาก x-ui.db
+  DATA=$(sshpass -p "$SSH_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+    "sqlite3 /etc/x-ui/x-ui.db \
+     \"SELECT id, expiry_time FROM client_traffics WHERE enable=1;\""
+  )
 
-  [[ -z \"$DATA\" ]] && { echo \"❌ Sync failed\"; return; }
+  if [[ -z "$DATA" ]]; then
+    echo "❌ Sync x-ui failed (no data)"
+    return
+  fi
+
+  echo "[*] Importing users..."
+
+  # ล้าง users เดิมก่อน (sync mode)
+  sqlite3 "$DB" "DELETE FROM users;"
+
+  while IFS='|' read -r cid ts; do
+    [[ -z "$cid" ]] && continue
+
+    # expiry_time handling
+    if [[ "$ts" == "0" ]]; then
+      exp="2099-12-31"
+    elif [[ "$ts" -lt 0 ]]; then
+      continue
+    else
+      exp=$(date -d "@$((ts/1000))" +%F)
+    fi
+
+    # ใช้ id เป็น username + password
+    sqlite3 "$DB" \
+      "INSERT OR REPLACE INTO users VALUES('$cid','$cid','$exp');"
+
+  done <<< "$DATA"
+
+  update_cfg
 
   echo "sync:x-ui" > "$MODEFILE"
-  MODE=$(cat "$MODEFILE")
-  AUTODELETE="DISABLED"
+  date +"%F %T" > "$LASTSYNC"
 
-  sync_import_expire_date "$DATA"
-
+  echo
   echo "[✓] Sync x-ui completed"
 }
 
