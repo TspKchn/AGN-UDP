@@ -30,6 +30,16 @@ pause(){ read -rp "Press Enter to continue..."; }
 ### ================= UI =================
 header() {
   clear
+
+  # อ่านสถานะใหม่ทุกครั้ง
+  MODE=$(cat "$MODEFILE" 2>/dev/null || echo "manual")
+
+  AUTODELETE="ENABLED"
+  [[ "$MODE" != "manual" ]] && AUTODELETE="DISABLED"
+
+  LASTSYNC_TXT="-"
+  [[ -f "$LASTSYNC" ]] && LASTSYNC_TXT=$(cat "$LASTSYNC")
+
   echo "======================================"
   echo "           AGN-UDP MANAGER"
   echo "======================================"
