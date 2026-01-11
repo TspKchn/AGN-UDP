@@ -2,15 +2,16 @@
 
 CFG="/etc/hysteria/config.json"
 DB="/etc/hysteria/users.db"
+
 STATE="/etc/agnudp"
 MODEFILE="$STATE/mode"
 LASTSYNC="$STATE/last_sync"
 
 BACKUP_DIR="/backup"
 BACKUP_FILE="$BACKUP_DIR/agnudp-users.db.7z"
+BACKUP_PORT="8080"
 
 SERVICE="hysteria-server"
-NGINX_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
 CRON_FILE="/etc/cron.d/agnudp"
 
 mkdir -p "$STATE"
@@ -38,41 +39,46 @@ header() {
 }
 
 update_cfg() {
-  users=$(sqlite3 "$DB" "select username||\":\"||password from users where date(expire)>=date('now')" 2>/dev/null)
-  jq ".auth.config = $(printf '%s\n' "$users" | jq -R . | jq -s .)" "$CFG" > /tmp/cfg && mv /tmp/cfg "$CFG"
-  systemctl restart hysteria-server >/dev/null 2>&1 || true
+  users=$(sqlite3 "$DB" \
+    "select username||\":\"||password from users where date(expire)>=date('now')" \
+    2>/dev/null)
+  jq ".auth.config = $(printf '%s\n' "$users" | jq -R . | jq -s .)" \
+    "$CFG" > /tmp/cfg && mv /tmp/cfg "$CFG"
+  systemctl restart "$SERVICE" >/dev/null 2>&1 || true
 }
 
-### ===== USER =====
+# ================= USER =================
 add_user() {
-  read -rp "Username: " u
-  read -rp "Password: " p
-  read -rp "Days: " d
+  read -rp "Username : " u
+  read -rp "Password : " p
+  read -rp "Days     : " d
   e=$(date -d "+$d days" +%F)
   sqlite3 "$DB" "insert or replace into users values('$u','$p','$e')"
   update_cfg
 }
 
 extend_user() {
-  read -rp "Username: " u
-  read -rp "Add days: " d
+  read -rp "Username : " u
+  read -rp "Add days : " d
   cur=$(sqlite3 "$DB" "select expire from users where username='$u'")
+  [[ -z "$cur" ]] && { echo "[x] User not found"; return; }
   new=$(date -d "$cur +$d days" +%F)
   sqlite3 "$DB" "update users set expire='$new' where username='$u'"
   update_cfg
 }
 
 delete_user() {
-  read -rp "Username: " u
+  read -rp "Username : " u
   sqlite3 "$DB" "delete from users where username='$u'"
   update_cfg
 }
 
 list_user() {
+  echo
   sqlite3 "$DB" "select username || ' | ' || expire from users;"
 }
 
-### ===== BACKUP =====
+# ================= BACKUP =================
 backup_db() {
   read -rsp "Backup password: " p
   echo
@@ -85,16 +91,24 @@ restore_db() {
   read -rp "Restore Server IP/Domain: " ip
   read -rsp "Backup password: " p
   echo
-  tmp=/tmp/agnudp-restore
+
+  tmp="/tmp/agnudp-restore"
   rm -rf "$tmp" && mkdir -p "$tmp"
-  curl -fsSL "http://$ip:8080/backup/$(basename $BACKUP_FILE)" -o "$tmp/db.7z" || { echo "[x] Download failed"; return; }
-  7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null || { echo "[x] Wrong password"; return; }
+
+  curl -fsSL \
+    "http://$ip:$BACKUP_PORT/backup/$(basename $BACKUP_FILE)" \
+    -o "$tmp/db.7z" || { echo "[x] Download failed"; return; }
+
+  7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null || {
+    echo "[x] Wrong password"; return;
+  }
+
   cp "$tmp/$(basename $DB)" "$DB"
   update_cfg
   echo "[✓] Restore completed"
 }
 
-### ===== SYNC (SILENT) =====
+# ================= SYNC =================
 ssh_exec() {
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
@@ -107,7 +121,7 @@ ssh_exec() {
 sync_import() {
   sqlite3 "$DB" "delete from users;"
   while IFS='|' read -r u e; do
-    [[ -z "$u" ]] && continue
+    [[ -z "$u" || -z "$e" ]] && continue
     sqlite3 "$DB" "insert into users values('$u','$u','$e');"
   done <<< "$1"
   update_cfg
@@ -115,11 +129,11 @@ sync_import() {
 }
 
 sync_local() {
-  echo "[*] Syncing local users..."
+  echo "[*] Sync local..."
   DATA=$(sqlite3 "$DB" "select username,expire from users;")
   sync_import "$DATA"
   echo "manual" > "$MODEFILE"
-  echo "[✓] Sync local completed"
+  echo "[✓] Sync local done"
 }
 
 sync_remote() {
@@ -129,12 +143,16 @@ sync_remote() {
   read -rp "SSH User: " SSH_USER
   read -rsp "SSH Password: " SSH_PASS
   echo
-  echo "[*] Syncing remote..."
-  DATA=$(ssh_exec "sqlite3 /etc/hysteria/users.db 'select username,expire from users;'")
+
+  echo "[*] Sync remote..."
+  DATA=$(ssh_exec \
+    "sqlite3 /etc/hysteria/users.db 'select username,expire from users;'")
+
   [[ -z "$DATA" ]] && { echo "[x] Sync failed"; return; }
+
   sync_import "$DATA"
   echo "sync:remote" > "$MODEFILE"
-  echo "[✓] Sync remote completed"
+  echo "[✓] Sync remote done"
 }
 
 sync_3xui() {
@@ -144,23 +162,30 @@ sync_3xui() {
   read -rp "SSH User: " SSH_USER
   read -rsp "SSH Password: " SSH_PASS
   echo
-  echo "[*] Syncing 3x-ui..."
-  DATA=$(ssh_exec "sqlite3 /etc/x-ui/x-ui.db \"select email,expiry_time from client_traffics;\"")
+
+  echo "[*] Sync 3x-ui..."
+  DATA=$(ssh_exec \
+    "sqlite3 /etc/x-ui/x-ui.db \"select email,expiry_time from client_traffics;\"")
+
   DATA=$(echo "$DATA" | awk -F'|' '{print $1 "|" strftime("%Y-%m-%d",$2/1000)}')
   [[ -z "$DATA" ]] && { echo "[x] Sync failed"; return; }
+
   sync_import "$DATA"
   echo "sync:3xui" > "$MODEFILE"
-  echo "[✓] Sync 3x-ui completed"
+  echo "[✓] Sync 3x-ui done"
 }
 
+# ================= CLEANUP =================
 cleanup_expired() {
-  [[ "$AUTODELETE" != "ENABLED" ]] && { echo "[!] AutoDelete disabled (sync mode)"; return; }
+  [[ "$AUTODELETE" != "ENABLED" ]] && {
+    echo "[!] AutoDelete disabled (sync mode)"; return;
+  }
   sqlite3 "$DB" "delete from users where date(expire)<date('now');"
   update_cfg
-  echo "[✓] Cleanup done"
+  echo "[✓] Cleanup completed"
 }
 
-### ===== UNINSTALL (FIXED) =====
+# ================= UNINSTALL =================
 uninstall_all() {
   clear
   echo "======================================"
@@ -172,15 +197,12 @@ uninstall_all() {
 
   set +e
 
-  systemctl stop hysteria-server 2>/dev/null
-  systemctl disable hysteria-server 2>/dev/null
+  systemctl stop "$SERVICE" 2>/dev/null
+  systemctl disable "$SERVICE" 2>/dev/null
   rm -f /etc/systemd/system/hysteria-server.service
   systemctl daemon-reload
 
   rm -f "$CRON_FILE"
-  rm -f "$NGINX_CONF"
-  nginx -t >/dev/null 2>&1 && systemctl reload nginx
-
   rm -rf /etc/hysteria /etc/agnudp /backup
   rm -f /usr/local/bin/agnudp
 
@@ -188,8 +210,8 @@ uninstall_all() {
   while iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null; do
     iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712
   done
-  while iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null; do
-    iptables -D INPUT -p tcp --dport 8080 -j ACCEPT
+  while iptables -C INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT
   done
   iptables-save > /etc/iptables/rules.v4
 
@@ -199,7 +221,7 @@ uninstall_all() {
   exit 0
 }
 
-### ===== MENU =====
+# ================= MENU =================
 while true; do
   header
   echo " 1) Add User"
