@@ -261,13 +261,27 @@ cleanup_expired() {
 ### ================= UPDATE =================
 update_agnudp() {
   echo
-  echo "⏳ Updating agnudp..."
+  echo "⏳ Updating agnudp (force fresh from repo)..."
   echo
-  tmp=/tmp/agnudp.$$
-  curl -fsSL "$REPO_RAW" -o "$tmp" || { echo "❌ Update failed"; return; }
-  chmod +x "$tmp"
-  mv "$tmp" /usr/local/bin/agnudp
-  exec agnudp
+
+  TMP="/tmp/agnudp.$(date +%s)"
+
+  if ! curl -fsSL "https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/agnudp?$(date +%s)" -o "$TMP"; then
+    echo "❌ Update failed (download error)"
+    return
+  fi
+
+  chmod +x "$TMP"
+  mv "$TMP" /usr/local/bin/agnudp
+
+  # ล้าง bash command cache
+  hash -r
+
+  echo "✅ agnudp updated successfully"
+  echo "🔄 Restarting agnudp..."
+  sleep 1
+
+  exec /usr/local/bin/agnudp
 }
 
 ### ================= MENU =================
