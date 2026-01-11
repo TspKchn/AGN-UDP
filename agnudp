@@ -1,24 +1,18 @@
 #!/usr/bin/env bash
+set -e
 
 CFG="/etc/hysteria/config.json"
 DB="/etc/hysteria/users.db"
-
 STATE="/etc/agnudp"
 MODEFILE="$STATE/mode"
 LASTSYNC="$STATE/last_sync"
 
-BACKUP_DIR="/backup"
-BACKUP_FILE="$BACKUP_DIR/agnudp-users.db.7z"
-BACKUP_PORT="8080"
-
 SERVICE="hysteria-server"
-CRON_FILE="/etc/cron.d/agnudp"
 
 mkdir -p "$STATE"
-
 [[ ! -f "$MODEFILE" ]] && echo "manual" > "$MODEFILE"
-MODE=$(cat "$MODEFILE")
 
+MODE=$(cat "$MODEFILE")
 AUTODELETE="ENABLED"
 [[ "$MODE" != "manual" ]] && AUTODELETE="DISABLED"
 
@@ -30,7 +24,7 @@ pause(){ read -rp "Press Enter to continue..."; }
 header() {
   clear
   echo "======================================"
-  echo "            AGN-UDP MANAGER            "
+  echo "           AGN-UDP MANAGER             "
   echo "======================================"
   echo " Mode       : $MODE"
   echo " AutoDelete : $AUTODELETE"
@@ -39,210 +33,148 @@ header() {
 }
 
 update_cfg() {
-  users=$(sqlite3 "$DB" \
-    "select username||\":\"||password from users where date(expire)>=date('now')" \
-    2>/dev/null)
-  jq ".auth.config = $(printf '%s\n' "$users" | jq -R . | jq -s .)" \
-    "$CFG" > /tmp/cfg && mv /tmp/cfg "$CFG"
+  local tmp="/tmp/agnudp-cfg.json"
+  sqlite3 "$DB" \
+    "select username||\":\"||password from users where date(expire)>=date('now')" |
+  jq -R . | jq -s '.' |
+  jq --argfile a - "$CFG" '.auth.config=$a' "$CFG" > "$tmp"
+  mv "$tmp" "$CFG"
   systemctl restart "$SERVICE" >/dev/null 2>&1 || true
 }
 
-# ================= USER =================
+#######################################
+# USER MANAGEMENT
+#######################################
 add_user() {
-  read -rp "Username : " u
-  read -rp "Password : " p
-  read -rp "Days     : " d
+  read -rp "Username: " u
+  read -rp "Password: " p
+  read -rp "Days: " d
   e=$(date -d "+$d days" +%F)
   sqlite3 "$DB" "insert or replace into users values('$u','$p','$e')"
   update_cfg
+  echo "[✓] User added"
 }
 
 extend_user() {
-  read -rp "Username : " u
-  read -rp "Add days : " d
+  read -rp "Username: " u
+  read -rp "Add days: " d
   cur=$(sqlite3 "$DB" "select expire from users where username='$u'")
-  [[ -z "$cur" ]] && { echo "[x] User not found"; return; }
+  [[ -z "$cur" ]] && { echo "User not found"; return; }
   new=$(date -d "$cur +$d days" +%F)
   sqlite3 "$DB" "update users set expire='$new' where username='$u'"
   update_cfg
+  echo "[✓] Extended"
 }
 
 delete_user() {
-  read -rp "Username : " u
+  read -rp "Username: " u
   sqlite3 "$DB" "delete from users where username='$u'"
   update_cfg
+  echo "[✓] Deleted"
 }
 
 list_user() {
   echo
-  sqlite3 "$DB" "select username || ' | ' || expire from users;"
+  sqlite3 "$DB" "select username || ' | ' || expire from users order by expire;"
+  echo
 }
 
-# ================= BACKUP =================
+#######################################
+# BACKUP / RESTORE
+#######################################
 backup_db() {
-  read -rsp "Backup password: " p
-  echo
-  rm -f "$BACKUP_FILE"
-  7z a -p"$p" -mhe=on "$BACKUP_FILE" "$DB" >/dev/null
-  echo "[✓] Backup saved"
+  read -rsp "Backup password: " p; echo
+  out="/backup/agnudp-users.db.7z"
+  rm -f "$out"
+  7z a -p"$p" -mhe=on "$out" "$DB" >/dev/null
+  echo "[✓] Backup saved: $out"
 }
 
 restore_db() {
-  read -rp "Restore Server IP/Domain: " ip
-  read -rsp "Backup password: " p
-  echo
-
+  read -rp "Backup server IP/Domain: " ip
+  read -rsp "Backup password: " p; echo
   tmp="/tmp/agnudp-restore"
-  rm -rf "$tmp" && mkdir -p "$tmp"
+  rm -rf "$tmp"; mkdir -p "$tmp"
 
-  curl -fsSL \
-    "http://$ip:$BACKUP_PORT/backup/$(basename $BACKUP_FILE)" \
-    -o "$tmp/db.7z" || { echo "[x] Download failed"; return; }
+  curl -fsSL "http://$ip:8080/backup/agnudp-users.db.7z" -o "$tmp/db.7z" \
+    || { echo "Download failed"; return; }
 
-  7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null || {
-    echo "[x] Wrong password"; return;
-  }
+  7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null \
+    || { echo "Wrong password"; return; }
 
-  cp "$tmp/$(basename $DB)" "$DB"
+  cp "$tmp/users.db" "$DB"
   update_cfg
+  date +"%F %T" > "$LASTSYNC"
   echo "[✓] Restore completed"
 }
 
-# ================= SYNC =================
+#######################################
+# SYNC (QUIET)
+#######################################
 ssh_exec() {
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=QUIET \
-    -o BatchMode=yes \
-    -T -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "$1" 2>/dev/null
+    -o LogLevel=ERROR \
+    -T -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "$1"
 }
 
 sync_import() {
   sqlite3 "$DB" "delete from users;"
   while IFS='|' read -r u e; do
-    [[ -z "$u" || -z "$e" ]] && continue
-    sqlite3 "$DB" "insert into users values('$u','$u','$e');"
+    [[ -z "$u" ]] && continue
+    sqlite3 "$DB" "insert into users values('$u','$u','$e')"
   done <<< "$1"
   update_cfg
   date +"%F %T" > "$LASTSYNC"
 }
 
 sync_local() {
-  echo "[*] Sync local..."
   DATA=$(sqlite3 "$DB" "select username,expire from users;")
   sync_import "$DATA"
   echo "manual" > "$MODEFILE"
-  echo "[✓] Sync local done"
+  echo "[✓] Local sync done"
 }
 
 sync_remote() {
-  read -rp "Remote IP/Domain: " SSH_HOST
-  read -rp "SSH Port [22]: " SSH_PORT
-  SSH_PORT=${SSH_PORT:-22}
+  read -rp "Remote IP: " SSH_HOST
+  read -rp "SSH Port [22]: " SSH_PORT; SSH_PORT=${SSH_PORT:-22}
   read -rp "SSH User: " SSH_USER
-  read -rsp "SSH Password: " SSH_PASS
-  echo
+  read -rsp "SSH Password: " SSH_PASS; echo
 
-  echo "[*] Sync remote..."
-  DATA=$(ssh_exec \
-    "sqlite3 /etc/hysteria/users.db 'select username,expire from users;'")
-
-  [[ -z "$DATA" ]] && { echo "[x] Sync failed"; return; }
+  DATA=$(ssh_exec "sqlite3 /etc/hysteria/users.db 'select username,expire from users;'") || true
+  [[ -z "$DATA" ]] && { echo "Sync failed"; return; }
 
   sync_import "$DATA"
   echo "sync:remote" > "$MODEFILE"
-  echo "[✓] Sync remote done"
+  echo "[✓] Remote sync completed"
 }
 
 sync_3xui() {
-  read -rp "3x-ui Server IP/Domain: " SSH_HOST
-  read -rp "SSH Port [22]: " SSH_PORT
-  SSH_PORT=${SSH_PORT:-22}
+  read -rp "3x-ui IP: " SSH_HOST
+  read -rp "SSH Port [22]: " SSH_PORT; SSH_PORT=${SSH_PORT:-22}
   read -rp "SSH User: " SSH_USER
-  read -rsp "SSH Password: " SSH_PASS
-  echo
+  read -rsp "SSH Password: " SSH_PASS; echo
 
-  echo "[*] Sync 3x-ui..."
-  DATA=$(ssh_exec \
-    "sqlite3 /etc/x-ui/x-ui.db \"select email,expiry_time from client_traffics;\"")
+  DATA=$(ssh_exec "sqlite3 /etc/x-ui/x-ui.db \"select email,expiry_time from client_traffics;\"") || true
+  [[ -z "$DATA" ]] && { echo "Sync failed"; return; }
 
   DATA=$(echo "$DATA" | awk -F'|' '{print $1 "|" strftime("%Y-%m-%d",$2/1000)}')
-  [[ -z "$DATA" ]] && { echo "[x] Sync failed"; return; }
-
   sync_import "$DATA"
   echo "sync:3xui" > "$MODEFILE"
-  echo "[✓] Sync 3x-ui done"
+  echo "[✓] 3x-ui sync completed"
 }
 
-# ================= CLEANUP =================
 cleanup_expired() {
-  [[ "$AUTODELETE" != "ENABLED" ]] && {
-    echo "[!] AutoDelete disabled (sync mode)"; return;
-  }
-  sqlite3 "$DB" "delete from users where date(expire)<date('now');"
+  [[ "$AUTODELETE" != "ENABLED" ]] && return
+  sqlite3 "$DB" "delete from users where date(expire)<date('now')"
   update_cfg
-  echo "[✓] Cleanup completed"
+  echo "[✓] Expired users cleaned"
 }
 
-# ================= UNINSTALL =================
-uninstall_all() {
-  clear
-  echo "======================================"
-  echo "   AGN-UDP FORCE UNINSTALL"
-  echo "======================================"
-  echo
-  echo "This will REMOVE AGN-UDP ONLY"
-  echo "3x-ui / ShowOn / watchdog will NOT be touched"
-  echo
-  read -rp "Type YES to confirm: " c
-  [[ "$c" != "YES" ]] && { echo "Cancelled"; sleep 1; return; }
-
-  echo
-  echo "[*] Stopping services..."
-  set +e   # <<< 🔥 สำคัญที่สุด
-
-  systemctl stop hysteria-server >/dev/null 2>&1 || true
-  systemctl disable hysteria-server >/dev/null 2>&1 || true
-
-  echo "[*] Removing systemd service..."
-  rm -f /etc/systemd/system/hysteria-server.service
-  rm -f /lib/systemd/system/hysteria-server.service
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl reset-failed >/dev/null 2>&1 || true
-
-  echo "[*] Removing cron..."
-  rm -f /etc/cron.d/agnudp
-
-  echo "[*] Removing files..."
-  rm -rf /etc/hysteria
-  rm -rf /etc/agnudp
-  rm -rf /backup
-  rm -f /usr/local/bin/agnudp
-  rm -f /usr/local/bin/hysteria
-
-  echo "[*] Cleaning iptables..."
-  IFACE=$(ip route | awk '/default/ {print $5; exit}')
-
-  iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null
-  iptables -D INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null
-  iptables-save > /etc/iptables/rules.v4 2>/dev/null
-
-  echo "[*] Cleaning nginx config..."
-  sed -i '/AGN-UDP/d' /etc/nginx/conf.d/*.conf 2>/dev/null
-  rm -f /etc/nginx/conf.d/agnudp-backup.conf
-  nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
-
-  echo
-  echo "[✓] AGN-UDP REMOVED COMPLETELY"
-  echo "[✓] System clean"
-  echo
-
-  sleep 2
-  exit 0
-}
-
-# ================= MENU =================
+#######################################
+# MENU
+#######################################
 while true; do
   header
   echo " 1) Add User"
@@ -258,13 +190,12 @@ while true; do
   echo " 9) Sync 3x-ui"
   echo
   echo "10) Cleanup Expired"
-  echo "11) Uninstall AGN-UDP"
   echo
   echo " 0) Exit"
   echo "--------------------------------------"
   read -rp "Select: " c
 
-  case $c in
+  case "$c" in
     1) add_user ;;
     2) extend_user ;;
     3) delete_user ;;
@@ -275,8 +206,8 @@ while true; do
     8) sync_remote ;;
     9) sync_3xui ;;
     10) cleanup_expired ;;
-    11) uninstall_all ;;
-    0) exit 0 ;;
+    0) exit ;;
   esac
+
   pause
 done
