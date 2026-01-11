@@ -178,7 +178,6 @@ sync_webmin() {
 
 ### ================= SYNC X-UI =================
 sync_xui() {
-sync_xui() {
   echo
   echo "[*] Syncing from x-ui..."
   echo
