@@ -158,6 +158,45 @@ sync_local() {
 }
 
 ### ================= SYNC WEBMIN =================
+sync_webmin() {
+  read -rp "Remote IP: " SSH_HOST
+  read -rp "SSH Port [22]: " SSH_PORT
+  SSH_PORT=${SSH_PORT:-22}
+  read -rp "SSH User: " SSH_USER
+  read -rp "SSH Password: " SSH_PASS
+  echo
+
+  echo "⏳ Syncing webmin users..."
+  echo
+
+  # ดึง user จริง (UID >= 1000 และไม่ใช่ nobody)
+  DATA=$(ssh_exec "
+    awk -F: '\$3 >= 1000 && \$3 < 65534 {print \$1\"|2099-12-31\"}' /etc/passwd
+  ")
+
+  if [[ -z "$DATA" ]]; then
+    echo "❌ Sync webmin failed (no users)"
+    return
+  fi
+
+  # ล้าง user เดิม
+  sqlite3 "$DB" "DELETE FROM users;"
+
+  while IFS='|' read -r USER EXPIRE; do
+    [[ -z "$USER" ]] && continue
+    sqlite3 "$DB" \
+      "INSERT OR REPLACE INTO users VALUES ('$USER','$USER','$EXPIRE');"
+  done <<< "$DATA"
+
+  update_cfg
+
+  echo "sync:webmin" > "$MODEFILE"
+  date +"%F %T" > "$LASTSYNC"
+
+  echo "✅ Sync webmin completed"
+}
+
+### ================= SYNC 3X-UI =================
 sync_xui() {
   read -rp "3x-ui Server IP: " SSH_HOST
   read -rp "SSH Port [22]: " SSH_PORT
