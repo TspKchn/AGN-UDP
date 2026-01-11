@@ -1,4 +1,4 @@
-#!/usr/bin/env hysteria-server
+#!/usr/bin/env bash
 set -e
 
 ### ================= FORCE CLEAN OLD AGN-UDP =================
