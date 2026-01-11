@@ -189,36 +189,82 @@ cleanup_expired() {
 uninstall_all() {
   clear
   echo "======================================"
-  echo "      REMOVE AGN-UDP COMPLETELY        "
+  echo "   AGN-UDP FORCE UNINSTALL (SAFE)"
   echo "======================================"
+  echo
+  echo "This will REMOVE AGN-UDP ONLY."
+  echo "It will NOT touch:"
+  echo " - 3x-ui"
+  echo " - ShowOn"
+  echo " - watchdog"
   echo
   read -rp "Type YES to confirm: " c
   [[ "$c" != "YES" ]] && return
 
-  set +e
+  echo
+  echo "[*] Stopping hysteria service..."
+  systemctl stop hysteria-server 2>/dev/null || true
+  systemctl disable hysteria-server 2>/dev/null || true
 
-  systemctl stop "$SERVICE" 2>/dev/null
-  systemctl disable "$SERVICE" 2>/dev/null
+  echo "[*] Removing systemd service..."
   rm -f /etc/systemd/system/hysteria-server.service
+  rm -f /lib/systemd/system/hysteria-server.service
   systemctl daemon-reload
+  systemctl reset-failed
 
-  rm -f "$CRON_FILE"
-  rm -rf /etc/hysteria /etc/agnudp /backup
+  echo "[*] Removing AGN-UDP cron..."
+  rm -f /etc/cron.d/agnudp
+  pkill -f agnudp 2>/dev/null || true
+
+  echo "[*] Removing AGN-UDP files..."
+  rm -rf /etc/hysteria
+  rm -rf /etc/agnudp
+  rm -rf /backup
   rm -f /usr/local/bin/agnudp
+  rm -f /usr/local/bin/hysteria
 
+  echo "[*] Cleaning iptables (AGN-UDP only)..."
   IFACE=$(ip route | awk '/default/ {print $5; exit}')
+
+  # remove UDP DNAT (hysteria)
   while iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null; do
     iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712
   done
-  while iptables -C INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT 2>/dev/null; do
-    iptables -D INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT
+
+  # remove backup port 8080
+  while iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport 8080 -j ACCEPT
   done
+
   iptables-save > /etc/iptables/rules.v4
 
+  echo "[*] Cleaning nginx AGN-UDP config..."
+
+  VPS_CONF="/etc/nginx/conf.d/vps.conf"
+  OLD_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
+
+  # Remove AGN-UDP block from vps.conf (marker-based)
+  if [[ -f "$VPS_CONF" ]]; then
+    sed -i '/# ==== AGN-UDP BACKUP START ====/{:a;/# ==== AGN-UDP BACKUP END ====/!{N;ba};d}' "$VPS_CONF"
+  fi
+
+  # Remove legacy nginx config
+  [[ -f "$OLD_CONF" ]] && rm -f "$OLD_CONF"
+
+  # Reload nginx safely
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx
+  else
+    echo "[!] nginx config error, skipped reload"
+  fi
+
   echo
-  echo "[✓] AGN-UDP UNINSTALLED COMPLETELY"
+  echo "[✓] AGN-UDP REMOVED COMPLETELY"
+  echo "[✓] 3x-ui / ShowOn / watchdog NOT touched"
+  echo
+
   sleep 2
-  kill -9 $$
+  exit 0
 }
 
 # ================= MENU =================
