@@ -126,25 +126,33 @@ sync_webmin() {
   read -rsp "SSH Password: " PASS
   echo
 
-  DATA=$(sshpass -p "$PASS" ssh -T \
+  DATA=$(sshpass -p "$PASS" ssh \
+    -T \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -p "$PORT" "$USER@$HOST" '
-      awk -F: "$3>=1000 && $3<65534 {print $1}" /etc/passwd |
-      while read u; do
-        exp=$(awk -F: -v user="$u" "$1==user {print $8}" /etc/shadow)
-        if [ -z "$exp" ]; then
-          echo "$u|2099-12-31"
-        else
-          date -d "1970-01-01 +$exp days" "+$u|%Y-%m-%d"
-        fi
-      done
-    ')
+    -o LogLevel=ERROR \
+    -p "$PORT" "$USER@$HOST" \
+    'bash --noprofile --norc -s' <<'EOF'
+set -e
+
+awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd |
+while read u; do
+  exp=$(awk -F: -v user="$u" '$1==user {print $8}' /etc/shadow)
+  if [ -z "$exp" ]; then
+    echo "$u|2099-12-31"
+  else
+    date -d "1970-01-01 +$exp days" "+$u|%Y-%m-%d"
+  fi
+done
+EOF
+)
 
   [[ -z "$DATA" ]] && { echo "❌ Sync webmin failed"; return; }
 
   sync_apply "$DATA"
   echo "sync:webmin" > "$MODEFILE"
+  date +"%F %T" > "$LASTSYNC"
+
   echo "[✓] Sync webmin completed"
 }
 
