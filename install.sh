@@ -25,7 +25,7 @@ systemctl reset-failed 2>/dev/null
 
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
-# remove UDP DNAT (AGN-UDP)
+# remove UDP DNAT
 while iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712 2>/dev/null; do
   iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 10000:65000 -j DNAT --to :36712
 done
@@ -37,11 +37,8 @@ done
 
 iptables-save > /etc/iptables/rules.v4 2>/dev/null
 
-# clean nginx agnudp config
+# remove old agnudp nginx conf only
 rm -f /etc/nginx/conf.d/agnudp-backup.conf
-if [[ -f /etc/nginx/conf.d/vps.conf ]]; then
-  sed -i '/# ==== AGN-UDP BACKUP START ====/,/# ==== AGN-UDP BACKUP END ====/d' /etc/nginx/conf.d/vps.conf
-fi
 
 nginx -t >/dev/null 2>&1 && systemctl reload nginx
 
@@ -68,7 +65,7 @@ HYSTERIA_BIN="/usr/local/bin/hysteria"
 SERVICE_FILE="/etc/systemd/system/hysteria-server.service"
 
 BACKUP_DIR="/backup"
-NGINX_CONF="/etc/nginx/conf.d/vps.conf"
+NGINX_AGN_CONF="/etc/nginx/conf.d/agnudp-backup.conf"
 BACKUP_PORT="8080"
 
 ############################################
@@ -92,7 +89,7 @@ apt install -y \
   nginx p7zip-full sshpass
 
 ############################################
-# INSTALL HYSTERIA v1 (FORCE)
+# INSTALL HYSTERIA v1
 ############################################
 rm -f "$HYSTERIA_BIN"
 curl -L -o "$HYSTERIA_BIN" \
@@ -176,17 +173,13 @@ systemctl enable hysteria-server
 systemctl restart hysteria-server
 
 ############################################
-# NETWORK / FIREWALL
+# FIREWALL
 ############################################
 iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport $UDP_RANGE -j DNAT --to :$UDP_PORT
 
 iptables -C INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT 2>/dev/null || \
 iptables -I INPUT -p tcp --dport $BACKUP_PORT -j ACCEPT
-
-sysctl -w net.ipv4.ip_forward=1
-sysctl -w net.ipv4.conf.all.rp_filter=0
-sysctl -w net.ipv4.conf.$IFACE.rp_filter=0
 
 iptables-save > /etc/iptables/rules.v4
 
@@ -197,28 +190,19 @@ mkdir -p "$BACKUP_DIR"
 chmod 755 "$BACKUP_DIR"
 
 ############################################
-# NGINX (USE vps.conf)
+# NGINX (AGN-UDP ONLY)
 ############################################
-if [[ ! -f "$NGINX_CONF" ]]; then
-  echo "❌ $NGINX_CONF not found (ShowOn not installed?)"
-  exit 1
-fi
+cat > "$NGINX_AGN_CONF" <<EOF
+server {
+    listen $BACKUP_PORT;
+    server_name _;
 
-if ! grep -q "listen $BACKUP_PORT" "$NGINX_CONF"; then
-  sed -i "/server {/a\\    listen $BACKUP_PORT;" "$NGINX_CONF"
-fi
-
-if ! grep -q "AGN-UDP BACKUP START" "$NGINX_CONF"; then
-cat >> "$NGINX_CONF" <<'EOF'
-
-# ==== AGN-UDP BACKUP START ====
-location /backup/ {
-    alias /backup/;
-    autoindex on;
+    location /backup/ {
+        alias $BACKUP_DIR/;
+        autoindex on;
+    }
 }
-# ==== AGN-UDP BACKUP END ====
 EOF
-fi
 
 nginx -t && systemctl reload nginx
 
