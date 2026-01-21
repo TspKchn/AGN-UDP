@@ -108,6 +108,22 @@ restore_db() {
 }
 
 ############################################
+# IMPORT EXPIRE DATE (CORE)
+############################################
+sync_import_expire_date() {
+  sqlite3 "$DB" "DELETE FROM users;"
+
+  while IFS='|' read -r u e; do
+    [[ -z "$u" || -z "$e" ]] && continue
+    sqlite3 "$DB" \
+      "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e');"
+  done <<< "$1"
+
+  update_cfg
+  date +"%F %T" > "$LASTSYNC"
+}
+
+############################################
 # SYNC LOCAL
 ############################################
 sync_local() {
@@ -138,7 +154,7 @@ sync_webmin_core() {
   sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -T -p "$PORT" "$USER@$HOST" '
     awk -F: "$3>=1000 && $3<65534 {print $1}" /etc/passwd |
     while read u; do
-      exp=$(awk -F: -v U="$u" "$1==U{print \$8}" /etc/shadow)
+      exp=$(awk -F: -v U="$u" '$1==U {print $8}' /etc/shadow)
       if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
         echo "$u|2099-12-31"
       else
@@ -229,14 +245,20 @@ auto_sync() {
   source "$REMOTECFG"
 
   case "$TYPE" in
-    webmin)
-      DATA=$(sync_webmin_core "$HOST" "$PORT" "$USER" "$PASS")
-      ;;
-    x-ui)
-      DATA=$(sync_xui_core "$HOST" "$PORT" "$USER" "$PASS")
-      ;;
-    *) exit 0 ;;
-  esac
+  webmin)
+    DATA=$(sync_webmin_core "$HOST" "$PORT" "$USER" "$PASS")
+    ;;
+  x-ui)
+    DATA=$(sync_xui_core "$HOST" "$PORT" "$USER" "$PASS")
+    ;;
+  local)
+    sync_local
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
 
   [[ -z "$DATA" ]] && exit 0
 
@@ -309,6 +331,7 @@ update_agnudp() {
 ############################################
 case "$1" in
   auto-sync) auto_sync; exit 0 ;;
+  sync-local) sync_local; exit 0 ;;
   sync-webmin) sync_webmin; exit 0 ;;
   sync-xui) sync_xui; exit 0 ;;
 esac
