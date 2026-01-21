@@ -293,6 +293,26 @@ update_agnudp() {
   exec /usr/local/bin/agnudp
 }
 
+### ================= CLI MODE =================
+case "$1" in
+  sync-local)
+    sync_local
+    exit 0
+    ;;
+  sync-webmin)
+    sync_webmin
+    exit 0
+    ;;
+  sync-xui)
+    sync_xui
+    exit 0
+    ;;
+  cleanup)
+    cleanup_expired
+    exit 0
+    ;;
+esac
+
 ### ================= MENU =================
 while true; do
   header
