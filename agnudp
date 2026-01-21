@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+set -e
+
+############################################
+# PATH / STATE
+############################################
+CFG="/etc/hysteria/config.json"
+DB="/etc/hysteria/users.db"
+
+STATE="/etc/agnudp"
+MODEFILE="$STATE/mode"
+LASTSYNC="$STATE/last_sync"
+REMOTECFG="$STATE/remote.conf"
+
+BACKUP_DIR="/backup"
+BACKUP_FILE="$BACKUP_DIR/agnudp-users.db.7z"
+
+mkdir -p "$STATE"
+[[ ! -f "$MODEFILE" ]] && echo "manual" > "$MODEFILE"
+
+pause(){ read -rp "Press Enter to continue..."; }
+
+############################################
+# HEADER
+############################################
+header() {
+  clear
+  MODE=$(cat "$MODEFILE" 2>/dev/null || echo manual)
+  AUTODELETE="ENABLED"
+  [[ "$MODE" != "manual" ]] && AUTODELETE="DISABLED"
+  LAST="-"
+  [[ -f "$LASTSYNC" ]] && LAST=$(cat "$LASTSYNC")
+
+  echo "======================================"
+  echo "           AGN-UDP MANAGER"
+  echo "======================================"
+  echo " Mode       : $MODE"
+  echo " AutoDelete : $AUTODELETE"
+  echo " Last Sync  : $LAST"
+  echo "--------------------------------------"
+}
+
+############################################
+# CORE
+############################################
+update_cfg() {
+  users=$(sqlite3 "$DB" "select username||\":\"||password from users where date(expire)>=date('now')")
+  jq ".auth.config = $(printf '%s\n' "$users" | jq -R . | jq -s .)" \
+    "$CFG" > /tmp/cfg && mv /tmp/cfg "$CFG"
+  systemctl restart hysteria-server >/dev/null 2>&1 || true
+}
+
+############################################
+# USER
+############################################
+add_user() {
+  read -rp "Username: " u
+  read -rp "Password: " p
+  read -rp "Days: " d
+  e=$(date -d "+$d days" +%F)
+  sqlite3 "$DB" "insert or replace into users values('$u','$p','$e')"
+  update_cfg
+}
+
+extend_user() {
+  read -rp "Username: " u
+  read -rp "Add days: " d
+  cur=$(sqlite3 "$DB" "select expire from users where username='$u'")
+  new=$(date -d "$cur +$d days" +%F)
+  sqlite3 "$DB" "update users set expire='$new' where username='$u'"
+  update_cfg
+}
+
+delete_user() {
+  read -rp "Username: " u
+  sqlite3 "$DB" "delete from users where username='$u'"
+  update_cfg
+}
+
+list_user() {
+  echo
+  sqlite3 "$DB" "select username || ' | ' || expire from users;"
+}
+
+############################################
+# BACKUP
+############################################
+backup_db() {
+  read -rp "Backup password: " p
+  rm -f "$BACKUP_FILE"
+  7z a -p"$p" -mhe=on "$BACKUP_FILE" "$DB" >/dev/null
+  echo "[✓] Backup saved"
+}
+
+restore_db() {
+  read -rp "Restore IP/Domain: " ip
+  read -rp "Backup password: " p
+
+  tmp=/tmp/agnudp-restore
+  rm -rf "$tmp" && mkdir -p "$tmp"
+
+  curl -fsSL "http://$ip:8080/backup/$(basename $BACKUP_FILE)" -o "$tmp/db.7z" || return
+  7z x -p"$p" "$tmp/db.7z" -o"$tmp" >/dev/null || return
+
+  cp "$tmp/$(basename $DB)" "$DB"
+  update_cfg
+  echo "[✓] Restore completed"
+}
+
+############################################
+# SYNC LOCAL
+############################################
+sync_local() {
+  echo
+  echo "⏳ Syncing local users..."
+  echo
+
+  DATA=$(sqlite3 "$DB" "SELECT username,expire FROM users;")
+
+  if [[ -z "$DATA" ]]; then
+    echo "❌ No local users found"
+    return
+  fi
+
+  echo "sync:local" > "$MODEFILE"
+
+  sync_import_expire_date "$DATA"
+
+  echo "[✓] Sync local completed"
+}
+
+############################################
+# SYNC WEBMIN (shadow)
+############################################
+sync_webmin_core() {
+  local HOST=$1 PORT=$2 USER=$3 PASS=$4
+
+  sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -T -p "$PORT" "$USER@$HOST" '
+    awk -F: "$3>=1000 && $3<65534 {print $1}" /etc/passwd |
+    while read u; do
+      exp=$(awk -F: -v U="$u" "$1==U{print \$8}" /etc/shadow)
+      if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
+        echo "$u|2099-12-31"
+      else
+        echo "$u|$(date -d "1970-01-01 + $exp days" +%F)"
+      fi
+    done
+  '
+}
+
+sync_webmin() {
+  read -rp "Remote IP: " H
+  read -rp "SSH Port [22]: " P; P=${P:-22}
+  read -rp "SSH User: " U
+  read -rp "SSH Password: " S
+
+  DATA=$(sync_webmin_core "$H" "$P" "$U" "$S")
+  [[ -z "$DATA" ]] && { echo "❌ Sync failed"; return; }
+
+  sqlite3 "$DB" "DELETE FROM users;"
+  while IFS='|' read -r u e; do
+    sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+  done <<< "$DATA"
+
+  cat > "$REMOTECFG" <<EOF
+TYPE=webmin
+HOST=$H
+PORT=$P
+USER=$U
+PASS=$S
+EOF
+  chmod 600 "$REMOTECFG"
+
+  update_cfg
+  echo "sync:webmin" > "$MODEFILE"
+  date +"%F %T" > "$LASTSYNC"
+  echo "✅ Sync webmin completed"
+}
+
+############################################
+# SYNC X-UI
+############################################
+sync_xui_core() {
+  local HOST=$1 PORT=$2 USER=$3 PASS=$4
+
+  sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -T -p "$PORT" "$USER@$HOST" \
+    "sqlite3 /etc/x-ui/x-ui.db \"SELECT settings FROM inbounds WHERE settings LIKE '%clients%';\""
+}
+
+sync_xui() {
+  read -rp "3x-ui IP: " H
+  read -rp "SSH Port [22]: " P; P=${P:-22}
+  read -rp "SSH User: " U
+  read -rp "SSH Password: " S
+
+  DATA=$(sync_xui_core "$H" "$P" "$U" "$S")
+  [[ -z "$DATA" ]] && { echo "❌ Sync failed"; return; }
+
+  sqlite3 "$DB" "DELETE FROM users;"
+  echo "$DATA" | jq -r '
+    .clients[] | select(.enable==true) |
+    "\(.id)|" +
+    (if (.expiryTime|tonumber)<=0 then "2099-12-31"
+     else (.expiryTime/1000|strftime("%Y-%m-%d")) end)
+  ' | while IFS='|' read -r u e; do
+    sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+  done
+
+  cat > "$REMOTECFG" <<EOF
+TYPE=x-ui
+HOST=$H
+PORT=$P
+USER=$U
+PASS=$S
+EOF
+  chmod 600 "$REMOTECFG"
+
+  update_cfg
+  echo "sync:x-ui" > "$MODEFILE"
+  date +"%F %T" > "$LASTSYNC"
+  echo "✅ Sync x-ui completed"
+}
+
+############################################
+# AUTO SYNC (CRON)
+############################################
+auto_sync() {
+  [[ ! -f "$REMOTECFG" ]] && exit 0
+  source "$REMOTECFG"
+
+  case "$TYPE" in
+    webmin)
+      DATA=$(sync_webmin_core "$HOST" "$PORT" "$USER" "$PASS")
+      ;;
+    x-ui)
+      DATA=$(sync_xui_core "$HOST" "$PORT" "$USER" "$PASS")
+      ;;
+    *) exit 0 ;;
+  esac
+
+  [[ -z "$DATA" ]] && exit 0
+
+  sqlite3 "$DB" "DELETE FROM users;"
+
+  if [[ "$TYPE" == "x-ui" ]]; then
+    echo "$DATA" | jq -r '
+      .clients[] | select(.enable==true) |
+      "\(.id)|" +
+      (if (.expiryTime|tonumber)<=0 then "2099-12-31"
+       else (.expiryTime/1000|strftime("%Y-%m-%d")) end)
+    ' | while IFS='|' read -r u e; do
+      sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+    done
+  else
+    while IFS='|' read -r u e; do
+      sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+    done <<< "$DATA"
+  fi
+
+  update_cfg
+  date +"%F %T" > "$LASTSYNC"
+}
+
+############################################
+# CLEANUP EXPIRED
+############################################
+cleanup_expired() {
+  MODE=$(cat "$MODEFILE" 2>/dev/null || echo manual)
+
+  if [[ "$MODE" != "manual" ]]; then
+    echo "[!] AutoDelete disabled in sync mode"
+    return
+  fi
+
+  sqlite3 "$DB" "DELETE FROM users WHERE date(expire) < date('now');"
+  update_cfg
+  echo "[✓] Cleanup completed"
+}
+
+############################################
+# UPDATE AGNUDP
+############################################
+update_agnudp() {
+  echo
+  echo "⏳ Updating agnudp..."
+  echo
+
+  TMP="/tmp/agnudp.$(date +%s)"
+
+  if ! curl -fsSL "https://raw.githubusercontent.com/TspKchn/AGN-UDP/main/agnudp?$(date +%s)" -o "$TMP"; then
+    echo "❌ Update failed (download error)"
+    return
+  fi
+
+  chmod +x "$TMP"
+  mv "$TMP" /usr/local/bin/agnudp
+
+  # clear bash cache
+  hash -r
+
+  echo "✅ Update completed"
+  echo "🔄 Restarting agnudp..."
+  sleep 1
+  exec /usr/local/bin/agnudp
+}
+
+############################################
+# CLI
+############################################
+case "$1" in
+  auto-sync) auto_sync; exit 0 ;;
+  sync-webmin) sync_webmin; exit 0 ;;
+  sync-xui) sync_xui; exit 0 ;;
+esac
+
+############################################
+# MENU
+############################################
+while true; do
+  header
+  echo " 1) Add User"
+  echo " 2) Extend User"
+  echo " 3) Delete User"
+  echo " 4) List Users"
+  echo
+  echo " 5) Backup"
+  echo " 6) Restore"
+  echo
+  echo " 7) Sync Local"
+  echo " 8) Sync Webmin"
+  echo " 9) Sync x-ui"
+  echo
+  echo "10) Cleanup Expired"
+  echo "11) Update agnudp"
+  echo
+  echo " 0) Exit"
+  echo "--------------------------------------"
+  read -rp "Select: " c
+
+  case $c in
+    1) add_user ;;
+    2) extend_user ;;
+    3) delete_user ;;
+    4) list_user ;;
+    5) backup_db ;;
+    6) restore_db ;;
+    7) sync_local ;;
+    8) sync_webmin ;;
+    9) sync_xui ;;
+    10) cleanup_expired ;;
+    11) update_agnudp ;;
+    0) exit ;;
+  esac
+  pause
+done
