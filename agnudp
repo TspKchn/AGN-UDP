@@ -170,21 +170,21 @@ sync_webmin() {
   echo
 
   DATA=$(sshpass -p "$SSH_PASS" ssh \
-  -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null \
-  -o LogLevel=ERROR \
-  -T -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
-    awk -F: "$3>=1000 && $3<65534 {print \$1}" /etc/passwd | while read u; do
-      line=$(grep "^$u:" /etc/shadow)
-      exp=$(echo "$line" | awk -F: "{print \$NF}")
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    -T -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
+      awk -F: '\''$3>=1000 && $3<65534 {print $1}'\'' /etc/passwd | while read u; do
+        line=$(grep "^$u:" /etc/shadow)
+        exp=$(echo "$line" | awk -F: '\''{print $NF}'\'')
 
-      if [ -z "$exp" ] || [ "$exp" = "-1" ] || [ "$exp" = "0" ]; then
-        echo "$u|2099-12-31"
-      else
-        echo "$u|$(date -d "1970-01-01 + $exp days" +%F 2>/dev/null)"
-      fi
-    done
-  ')
+        if [ -z "$exp" ] || [ "$exp" = "-1" ] || [ "$exp" = "0" ]; then
+          echo "$u|2099-12-31"
+        else
+          echo "$u|$(date -d "1970-01-01 + $exp days" +%F 2>/dev/null)"
+        fi
+      done
+    ')
 
   if [[ -z "$DATA" ]]; then
     echo "❌ Sync webmin failed (no data)"
