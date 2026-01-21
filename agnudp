@@ -176,6 +176,12 @@ sync_webmin() {
   read -rp "SSH User: " U
   read -rp "SSH Password: " S
 
+  echo
+  echo "⏳ Syncing webmin users..."
+  echo "   Server : $H:$P"
+  echo "   Please wait, syncing in progress..."
+  echo
+
   DATA=$(sync_webmin_core "$H" "$P" "$U" "$S")
   [[ -z "$DATA" ]] && { echo "❌ Sync failed"; return; }
 
@@ -215,6 +221,12 @@ sync_xui() {
   read -rp "SSH User: " U
   read -rp "SSH Password: " S
 
+  echo
+  echo "⏳ Syncing 3x-ui users..."
+  echo "   Server : $H:$P"
+  echo "   Please wait, syncing in progress..."
+  echo
+
   DATA=$(sync_xui_core "$H" "$P" "$U" "$S")
   [[ -z "$DATA" ]] && { echo "❌ Sync failed"; return; }
 
@@ -250,25 +262,34 @@ auto_sync() {
   [[ ! -f "$REMOTECFG" ]] && exit 0
   source "$REMOTECFG"
 
+  LOG="/var/log/agnudp-auto.log"
+
+  echo "[AUTO] $(date '+%F %T') start sync ($TYPE)" >> "$LOG"
+
   case "$TYPE" in
-  webmin)
-    DATA=$(sync_webmin_core "$HOST" "$PORT" "$USER" "$PASS")
-    ;;
-  x-ui)
-    DATA=$(sync_xui_core "$HOST" "$PORT" "$USER" "$PASS")
-    ;;
-  local)
-    sync_local
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
+    webmin)
+      DATA=$(sync_webmin_core "$HOST" "$PORT" "$USER" "$PASS" 2>>"$LOG")
+      ;;
+    x-ui)
+      DATA=$(sync_xui_core "$HOST" "$PORT" "$USER" "$PASS" 2>>"$LOG")
+      ;;
+    local)
+      sync_local >>"$LOG" 2>&1
+      echo "[AUTO] $(date '+%F %T') local sync done" >> "$LOG"
+      exit 0
+      ;;
+    *)
+      echo "[AUTO] unknown TYPE=$TYPE" >> "$LOG"
+      exit 0
+      ;;
+  esac
 
-  [[ -z "$DATA" ]] && exit 0
+  if [[ -z "$DATA" ]]; then
+    echo "[AUTO] $(date '+%F %T') no data received ($TYPE)" >> "$LOG"
+    exit 0
+  fi
 
-  sqlite3 "$DB" "DELETE FROM users;"
+  sqlite3 "$DB" "DELETE FROM users;" >>"$LOG" 2>&1
 
   if [[ "$TYPE" == "x-ui" ]]; then
     echo "$DATA" | jq -r '
@@ -277,17 +298,21 @@ esac
       (if (.expiryTime|tonumber)<=0 then "2099-12-31"
        else (.expiryTime/1000|strftime("%Y-%m-%d")) end)
     ' | while IFS='|' read -r u e; do
-      sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+      sqlite3 "$DB" \
+        "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')" >>"$LOG" 2>&1
     done
   else
     while IFS='|' read -r u e; do
-      sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')"
+      sqlite3 "$DB" \
+        "INSERT OR REPLACE INTO users VALUES ('$u','$u','$e')" >>"$LOG" 2>&1
     done <<< "$DATA"
   fi
 
-  update_cfg
+  update_cfg >>"$LOG" 2>&1
   date +"%F %T" > "$LASTSYNC"
   echo "sync:$TYPE" > "$MODEFILE"
+
+  echo "[AUTO] $(date '+%F %T') sync finished ($TYPE)" >> "$LOG"
 }
 
 ############################################
