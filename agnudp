@@ -294,6 +294,26 @@ update_agnudp() {
   exec /usr/local/bin/agnudp
 }
 
+### ================= AUTO SYNC =================
+auto_sync() {
+  MODE=$(cat "$MODEFILE" 2>/dev/null)
+
+  case "$MODE" in
+    sync:webmin)
+      sync_webmin
+      ;;
+    sync:x-ui)
+      sync_xui
+      ;;
+    sync:local)
+      sync_local
+      ;;
+    *)
+      echo "[!] Auto-sync skipped (manual mode)"
+      ;;
+  esac
+}
+
 ### ================= CLI MODE =================
 case "$1" in
   sync-local)
@@ -312,6 +332,10 @@ case "$1" in
     cleanup_expired
     exit 0
     ;;
+auto-sync)
+  auto_sync
+  exit
+  ;;
 esac
 
 ### ================= MENU =================
