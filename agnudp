@@ -4,6 +4,17 @@ set -e
 ### ================= PATH =================
 CFG="/etc/hysteria/config.json"
 DB="/etc/hysteria/users.db"
+REMOTECFG="$STATE/remote.conf"
+# บันทึกค่าไว้สำหรับ auto-sync
+  REMOTECFG="/etc/agnudp/remote.conf"
+  cat > "$REMOTECFG" <<EOF
+TYPE=x-ui
+HOST=$SSH_HOST
+PORT=$SSH_PORT
+USER=$SSH_USER
+PASS=$SSH_PASS
+EOF
+  chmod 600 "$REMOTECFG"
 
 STATE="/etc/agnudp"
 MODEFILE="$STATE/mode"
@@ -167,18 +178,15 @@ sync_webmin() {
   echo
 
   echo "⏳ Syncing webmin users (passwd + shadow)..."
-  echo
 
   DATA=$(sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
     -T -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
-      awk -F: '\''$3>=1000 && $3<65534 {print $1}'\'' /etc/passwd | while read u; do
-        shadow=$(grep "^$u:" /etc/shadow)
-        exp=$(echo "$shadow" | awk -F: '\''{print $8}'\'')
-
-        if [ -z "$exp" ] || [ "$exp" = "-1" ] || [ "$exp" = "0" ]; then
+      awk -F: '\''$3>=1000 && $3<65534 {print $1}'\'' /etc/passwd |
+      while read u; do
+        exp=$(awk -F: -v U="$u" '\''$1==U {print $8}'\'' /etc/shadow)
+        if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
           echo "$u|2099-12-31"
         else
           echo "$u|$(date -d "1970-01-01 + $exp days" +%F)"
@@ -186,24 +194,58 @@ sync_webmin() {
       done
     ')
 
-  [[ -z "$DATA" ]] && {
-    echo "❌ Sync webmin failed (no data)"
-    return
-  }
+  [[ -z "$DATA" ]] && { echo "❌ Sync failed"; return; }
 
   sqlite3 "$DB" "DELETE FROM users;"
-
-  while IFS='|' read -r USER EXPIRE; do
-    [[ -z "$USER" ]] && continue
-    sqlite3 "$DB" \
-      "INSERT OR REPLACE INTO users VALUES ('$USER','$USER','$EXPIRE');"
+  while IFS='|' read -r U E; do
+    sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$U','$U','$E');"
   done <<< "$DATA"
+
+  # 🔐 จำค่า remote
+  cat > "$REMOTECFG" <<EOF
+TYPE=webmin
+HOST=$SSH_HOST
+PORT=$SSH_PORT
+USER=$SSH_USER
+PASS=$SSH_PASS
+EOF
+  chmod 600 "$REMOTECFG"
 
   update_cfg
   echo "sync:webmin" > "$MODEFILE"
   date +"%F %T" > "$LASTSYNC"
 
-  echo "✅ Sync webmin completed (shadow-based, real expiry)"
+  echo "✅ Sync webmin completed"
+}
+
+### ================= SYNC WEBMIN (Auto Sync) =================
+sync_webmin_auto() {
+  source "$REMOTECFG"
+
+  DATA=$(sshpass -p "$PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -T -p "$PORT" "$USER@$HOST" '
+      awk -F: '\''$3>=1000 && $3<65534 {print $1}'\'' /etc/passwd |
+      while read u; do
+        exp=$(awk -F: -v U="$u" '\''$1==U {print $8}'\'' /etc/shadow)
+        if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
+          echo "$u|2099-12-31"
+        else
+          echo "$u|$(date -d "1970-01-01 + $exp days" +%F)"
+        fi
+      done
+    ')
+
+  [[ -z "$DATA" ]] && exit 0
+
+  sqlite3 "$DB" "DELETE FROM users;"
+  while IFS='|' read -r U E; do
+    sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$U','$U','$E');"
+  done <<< "$DATA"
+
+  update_cfg
+  date +"%F %T" > "$LASTSYNC"
 }
 
 ### ================= SYNC 3X-UI =================
@@ -257,6 +299,58 @@ sync_xui() {
   echo "✅ Sync x-ui completed"
 }
 
+### ================= SYNC 3X-UI (AUTO) =================
+sync_xui_auto() {
+  [[ ! -f "$REMOTECFG" ]] && exit 0
+  source "$REMOTECFG"
+
+  echo "[AUTO] Syncing x-ui..."
+
+  DATA=$(sshpass -p "$PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -T -p "$PORT" "$USER@$HOST" \
+    "sqlite3 /etc/x-ui/x-ui.db \
+     \"SELECT settings FROM inbounds WHERE settings LIKE '%clients%';\"")
+
+  [[ -z "$DATA" ]] && exit 0
+
+  sqlite3 "$DB" "DELETE FROM users;"
+
+  echo "$DATA" | jq -r '
+    .clients[] |
+    select(.enable == true) |
+    "\(.id)|\(
+      if (.expiryTime | tonumber) <= 0 then
+        "2099-12-31"
+      else
+        (.expiryTime / 1000 | strftime("%Y-%m-%d"))
+      end
+    )"
+  ' | while IFS='|' read -r U E; do
+        [[ -z "$U" ]] && continue
+        sqlite3 "$DB" "INSERT OR REPLACE INTO users VALUES ('$U','$U','$E');"
+      done
+
+  update_cfg
+
+  # บันทึกค่าไว้สำหรับ auto-sync
+  REMOTECFG="/etc/agnudp/remote.conf"
+  cat > "$REMOTECFG" <<EOF
+TYPE=x-ui
+HOST=$SSH_HOST
+PORT=$SSH_PORT
+USER=$SSH_USER
+PASS=$SSH_PASS
+EOF
+  chmod 600 "$REMOTECFG"
+
+  echo "sync:x-ui" > "$MODEFILE"
+  date +"%F %T" > "$LASTSYNC"
+
+  echo "✅ Sync x-ui completed"
+}
+
 ### ================= CLEANUP =================
 cleanup_expired() {
   [[ "$AUTODELETE" != "ENABLED" ]] && {
@@ -296,46 +390,23 @@ update_agnudp() {
 
 ### ================= AUTO SYNC =================
 auto_sync() {
-  MODE=$(cat "$MODEFILE" 2>/dev/null)
+  [[ ! -f "$REMOTECFG" ]] && exit 0
+  source "$REMOTECFG"
 
-  case "$MODE" in
-    sync:webmin)
-      sync_webmin
-      ;;
-    sync:x-ui)
-      sync_xui
-      ;;
-    sync:local)
-      sync_local
-      ;;
-    *)
-      echo "[!] Auto-sync skipped (manual mode)"
-      ;;
+  case "$TYPE" in
+    webmin) sync_webmin_auto ;;
+    x-ui)   sync_xui_auto ;;
+    local)  sync_local ;;
   esac
 }
 
 ### ================= CLI MODE =================
 case "$1" in
-  sync-local)
-    sync_local
-    exit 0
-    ;;
-  sync-webmin)
-    sync_webmin
-    exit 0
-    ;;
-  sync-xui)
-    sync_xui
-    exit 0
-    ;;
-  cleanup)
-    cleanup_expired
-    exit 0
-    ;;
-auto-sync)
-  auto_sync
-  exit
-  ;;
+  auto-sync) auto_sync; exit 0 ;;
+  sync-webmin) sync_webmin; exit 0 ;;
+  sync-xui) sync_xui; exit 0 ;;
+  sync-local) sync_local; exit 0 ;;
+  cleanup) cleanup_expired; exit 0 ;;
 esac
 
 ### ================= MENU =================
@@ -351,7 +422,22 @@ while true; do
   echo
   echo " 7) Sync Local"
   echo " 8) Sync Webmin"
-  echo " 9) Sync x-ui"
+  echo "auto_sync() {
+  [[ ! -f "$REMOTECFGcase "$1" in
+  auto-sync) auto_sync; exit 0 ;;
+  sync-webmin) sync_webmin; exit 0 ;;
+  sync-xui) sync_xui; exit 0 ;;
+  sync-local) sync_local; exit 0 ;;
+  cleanup) cleanup_expired; exit 0 ;;
+esac" ]] && exit 0
+  source "$REMOTECFG"
+
+  case "$TYPE" in
+    webmin) sync_webmin_auto ;;
+    x-ui)   sync_xui_auto ;;
+    local)  sync_local ;;
+  esac
+} 9) Sync x-ui"
   echo
   echo "10) Cleanup Expired"
   echo "11) Update agnudp"
