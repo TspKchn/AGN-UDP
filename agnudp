@@ -152,16 +152,16 @@ sync_webmin_core() {
   local HOST=$1 PORT=$2 USER=$3 PASS=$4
 
   sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -T -p "$PORT" "$USER@$HOST" '
-    awk -F: "$3>=1000 && $3<65534 {print $1}" /etc/passwd |
-    while read u; do
-      exp=$(awk -F: -v U="$u" '$1==U {print $8}' /etc/shadow)
-      if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
-        echo "$u|2099-12-31"
-      else
-        echo "$u|$(date -d "1970-01-01 + $exp days" +%F)"
-      fi
-    done
-  '
+  awk -F: "$3>=1000 && $3<65534 {print $1}" /etc/passwd |
+  while read u; do
+    exp=$(awk -F: -v UU="$u" '\''$1==UU {print $8}'\'' /etc/shadow)
+    if [ -z "$exp" ] || [ "$exp" = "-1" ]; then
+      echo "$u|2099-12-31"
+    else
+      echo "$u|$(date -d "1970-01-01 + $exp days" +%F)"
+    fi
+  done
+'
 }
 
 sync_webmin() {
@@ -281,6 +281,7 @@ esac
 
   update_cfg
   date +"%F %T" > "$LASTSYNC"
+  echo "sync:$TYPE" > "$MODEFILE"
 }
 
 ############################################
