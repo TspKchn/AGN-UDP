@@ -138,7 +138,8 @@ sync_local() {
     return
   fi
 
-  echo "sync:local" > "$MODEFILE"
+  # ❌ ห้ามเขียน MODEFILE ที่นี่
+  # echo "sync:local" > "$MODEFILE"
 
   sync_import_expire_date "$DATA"
 
